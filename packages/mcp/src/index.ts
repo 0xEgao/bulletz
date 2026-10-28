@@ -492,6 +492,106 @@ server.tool(
   },
 );
 
+type WidgetRow = {
+  id: string;
+  name: string;
+  description: string | null;
+  kind: string;
+  status: string;
+  url: string | null;
+  html?: string | null;
+  view?: unknown;
+  tool_name?: string | null;
+  created_by_handle?: string | null;
+};
+
+server.tool(
+  "list_widgets",
+  "Every app published into this workspace — live ones and drafts. Check here before publishing: publishing under a name that already exists REPLACES that app, so this is how you tell an update from an accident.",
+  {},
+  async () => {
+    try {
+      const r = await api.get<{ widgets: WidgetRow[] }>("/widgets");
+      if (!r.widgets.length) return text("No apps published yet.");
+      return text(
+        r.widgets
+          .map(
+            (w) =>
+              `${w.status === "active" ? "●" : "○"} ${w.name} — ${w.kind}${w.url ? ` ${w.url}` : ""}` +
+              `${w.tool_name ? ` · tool ${w.tool_name}` : ""} · by ${w.created_by_handle ?? "?"} · ${w.id}`,
+          )
+          .join("\n"),
+      );
+    } catch (e) {
+      return fail(e);
+    }
+  },
+);
+
+server.tool(
+  "read_widget",
+  "One app in full, its markup or URL included — read this before changing one, so an edit is an edit rather than a guess.",
+  { widget_id: z.string().uuid() },
+  async (args) => {
+    try {
+      const r = await api.get<{ widget: WidgetRow }>(`/widgets/${args.widget_id}`);
+      const w = r.widget;
+      const out = [
+        `# ${w.name} (${w.kind}, ${w.status})`,
+        w.description ?? "",
+        w.url ? `url: ${w.url}` : "",
+        w.view ? `view: ${JSON.stringify(w.view)}` : "",
+        w.html ? `\n---\n${w.html}` : "",
+      ].filter(Boolean);
+      return text(out.join("\n"));
+    } catch (e) {
+      return fail(e);
+    }
+  },
+);
+
+server.tool(
+  "update_widget",
+  "Change an app you published — its markup, its URL, its view or its name. You may change your own; anyone else's needs an admin. Editing what a LIVE app shows returns it to draft, because a human decides what the whole team sees.",
+  {
+    widget_id: z.string().uuid(),
+    name: z.string().min(2).max(64).optional(),
+    description: z.string().max(500).optional(),
+    html: z.string().max(400000).optional().describe("kind='html': replacement markup"),
+    url: z.string().url().max(2000).optional().describe("kind='embed': the page to frame"),
+    tool_args: z.record(z.unknown()).optional(),
+  },
+  async (args) => {
+    const { widget_id, ...patch } = args;
+    try {
+      const r = await api.patch<{ widget: { name: string; status: string }; returned_to_draft: boolean }>(
+        `/widgets/${widget_id}`,
+        patch,
+      );
+      return text(
+        `Updated "${r.widget.name}" (${r.widget.status}).` +
+          (r.returned_to_draft ? " It was live, so it is back to draft until a human activates it." : ""),
+      );
+    } catch (e) {
+      return fail(e);
+    }
+  },
+);
+
+server.tool(
+  "delete_widget",
+  "Remove an app from the workspace. Yours to remove; anyone else's needs an admin. This is permanent — the app goes, and only the event log remembers it existed.",
+  { widget_id: z.string().uuid() },
+  async (args) => {
+    try {
+      const r = await api.del<{ removed: { name: string } }>(`/widgets/${args.widget_id}`);
+      return text(`Removed "${r.removed.name}".`);
+    } catch (e) {
+      return fail(e);
+    }
+  },
+);
+
 server.tool(
   "publish_widget",
   "Publish a live UI into the workspace chat. Three kinds:\n• 'view' (preferred) — pick a built-in view type and map your tool's fields to it. Typed, themed, accessible, and it refreshes without costing a model call.\n• 'html' — your own HTML/CSS/JS for what the view types cannot express. It runs in a null-origin sandbox with no credentials and no access to the host page. Do NOT put an <iframe> to a website in here: the null origin is inherited, the site loads without storage, and most pages render blank. Use 'embed' for that.\n• 'embed' — frame a website at `url`. The site loads at its own origin, so it works normally; it is cross-origin from the workspace and cannot read it.\nWidgets are created as DRAFTS; a human activates them.",
@@ -525,8 +625,17 @@ server.tool(
   },
   async (args) => {
     try {
+      const before = await api
+        .get<{ widgets: { name: string }[] }>("/widgets")
+        .then((w) => w.widgets.some((x) => x.name === args.name))
+        .catch(() => false);
       const r = await api.post<{ widget: { id: string; name: string; status: string } }>("/widgets", args);
-      return text(`Published widget "${r.widget.name}" (${r.widget.id}) as a draft. A human can activate it in the UI.`);
+      return text(
+        `Published widget "${r.widget.name}" (${r.widget.id}) as a draft. A human can activate it in the UI.` +
+          // Publishing upserts on the name, so a collision is a replacement.
+          // Saying so is the difference between an update and a surprise.
+          (before ? ` This REPLACED the existing app of the same name, which is now a draft.` : ""),
+      );
     } catch (e) {
       return fail(e);
     }

@@ -4,6 +4,7 @@ import { maybeOne, one, q } from "../db.js";
 import { appendEvent } from "../repo.js";
 import { broadcast } from "../realtime.js";
 import { allow, requireActor } from "../authHook.js";
+import { can } from "../identity.js";
 import { ToolError, getTool, invokeTool } from "../tools.js";
 
 const ToolInput = z.object({
@@ -53,6 +54,21 @@ const WidgetInput = z.object({
     .refine((u) => /^https?:$/.test(new URL(u).protocol), "url must be http or https")
     .optional(),
   channel_id: z.string().uuid().optional(),
+});
+
+const WidgetPatch = z.object({
+  name: z.string().min(2).max(64).optional(),
+  description: z.string().max(500).optional(),
+  html: z.string().max(400_000).optional(),
+  url: z
+    .string()
+    .url()
+    .max(2000)
+    .refine((u) => /^https?:$/.test(new URL(u).protocol), "url must be http or https")
+    .optional(),
+  view: ViewSpec.optional(),
+  tool_args: z.record(z.unknown()).optional(),
+  pinned: z.boolean().optional(),
 });
 
 export async function widgetRoutes(app: FastifyInstance) {
@@ -258,16 +274,83 @@ export async function widgetRoutes(app: FastifyInstance) {
     return { widget };
   });
 
-  app.patch("/widgets/:id", async (req, reply) => {
+  /** One widget in full, content included — what an agent needs to change a
+   *  published app rather than blindly republish over it. */
+  app.get("/widgets/:id", async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
-    const body = z.object({ pinned: z.boolean() }).parse(req.body);
     const widget = await maybeOne(
-      `update widgets set pinned = $3 where workspace_id = $1 and id = $2
-       returning id, name, pinned`,
-      [req.actor.workspace_id, id, body.pinned],
+      `select w.id, w.name, w.description, w.kind, w.tool_id, w.tool_args, w.view, w.url,
+              w.html, w.status, w.pinned, w.created_at, w.created_by,
+              t.name as tool_name, a.handle as created_by_handle
+         from widgets w
+         left join tools t on t.id = w.tool_id
+         left join actors a on a.id = w.created_by
+        where w.workspace_id = $1 and w.id = $2`,
+      [req.actor.workspace_id, id],
     );
     if (!widget) return reply.code(404).send({ error: "widget not found" });
     return { widget };
+  });
+
+  app.patch("/widgets/:id", async (req, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    const body = WidgetPatch.parse(req.body);
+
+    const head = await maybeOne<{ created_by: string | null; status: string; kind: string }>(
+      `select created_by, status, kind from widgets where workspace_id = $1 and id = $2`,
+      [req.actor.workspace_id, id],
+    );
+    if (!head) return reply.code(404).send({ error: "widget not found" });
+
+    // Change your own; changing someone else's needs the capability that
+    // governs what the workspace contains. The same rule as a message: taking
+    // your own words back is yours to do, rewriting another author's under
+    // their name is not.
+    const own = head.created_by === req.actor.id;
+    if (!own && !can(req.actor, "activate")) {
+      return reply.code(403).send({ error: "only the author or an admin can change this app" });
+    }
+
+    const editsContent =
+      body.html !== undefined ||
+      body.url !== undefined ||
+      body.view !== undefined ||
+      body.tool_args !== undefined;
+
+    // Editing what a live app shows returns it to draft. Activation is the
+    // one human checkpoint on UI that every teammate sees, and an edit in
+    // place would walk straight past it — publish once, then change what it
+    // renders afterwards.
+    const backToDraft = editsContent && head.status === "active";
+
+    const widget = await maybeOne(
+      `update widgets set
+          name        = coalesce($3, name),
+          description = coalesce($4, description),
+          html        = coalesce($5, html),
+          url         = coalesce($6, url),
+          view        = coalesce($7::jsonb, view),
+          tool_args   = coalesce($8::jsonb, tool_args),
+          pinned      = coalesce($9, pinned),
+          status      = case when $10 then 'draft' else status end
+        where workspace_id = $1 and id = $2
+    returning id, name, description, kind, url, status, pinned`,
+      [
+        req.actor.workspace_id,
+        id,
+        body.name ?? null,
+        body.description ?? null,
+        body.html ?? null,
+        body.url ?? null,
+        body.view ? JSON.stringify(body.view) : null,
+        body.tool_args ? JSON.stringify(body.tool_args) : null,
+        body.pinned ?? null,
+        backToDraft,
+      ],
+    );
+    if (!widget) return reply.code(404).send({ error: "widget not found" });
+    if (editsContent) broadcast(req.actor.workspace_id, { type: "widget" });
+    return { widget, returned_to_draft: backToDraft };
   });
 
   /**
@@ -285,7 +368,14 @@ export async function widgetRoutes(app: FastifyInstance) {
    */
   app.delete("/widgets/:id", async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
-    if (!allow(req, reply, "activate")) return reply;
+    const head = await maybeOne<{ created_by: string | null }>(
+      `select created_by from widgets where workspace_id = $1 and id = $2`,
+      [req.actor.workspace_id, id],
+    );
+    if (!head) return reply.code(404).send({ error: "widget not found" });
+    if (head.created_by !== req.actor.id && !can(req.actor, "activate")) {
+      return reply.code(403).send({ error: "only the author or an admin can remove this app" });
+    }
     const widget = await maybeOne<{ id: string; name: string; kind: string }>(
       `delete from widgets where workspace_id = $1 and id = $2 returning id, name, kind`,
       [req.actor.workspace_id, id],
