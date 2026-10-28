@@ -36,7 +36,8 @@ contextBridge.exposeInMainWorld("bulletz", {
   },
   server: {
     get: () => ipcRenderer.invoke("server:get") as Promise<string | null>,
-    set: (url: string | null) => ipcRenderer.invoke("server:set", url) as Promise<string | null>,
+    set: (url: string | null, workspaceId?: string) =>
+      ipcRenderer.invoke("server:set", url, workspaceId) as Promise<string | null>,
   },
   notify: {
     show: (n: { title: string; body?: string; channelId?: string }) =>

@@ -158,7 +158,7 @@ export function App() {
         // Main runs the agent and the MCP bridge; they must follow the window.
         // Awaited, because the agent credential below is stored per server and
         // would otherwise be filed against whichever workspace was last open.
-        await bridge()?.server?.set(account.serverUrl);
+        await bridge()?.server?.set(account.serverUrl, actor.workspace_id);
         if (!live) return;
         // And the agent in the dock gets an identity without anyone having to
         // find the onboarding step for it.

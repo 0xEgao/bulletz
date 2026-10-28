@@ -40,7 +40,9 @@ type Bridge = {
   };
   server?: {
     get: () => Promise<string | null>;
-    set: (url: string | null) => Promise<string | null>;
+    /** The workspace id matters as much as the address: one server can answer
+     *  to several names, and a credential belongs to the workspace. */
+    set: (url: string | null, workspaceId?: string) => Promise<string | null>;
   };
   notify?: {
     show: (n: { title: string; body?: string; channelId?: string }) => Promise<boolean>;

@@ -133,11 +133,24 @@ export async function bootstrapRoutes(app: FastifyInstance) {
       if (!agent) return reply.code(404).send({ error: "no agent identity for this account" });
 
       const token = secret("blz_t");
+      // One agent, one live credential. This used to insert unconditionally,
+      // so every mint left the previous one working — six rows accumulated for
+      // a single agent in one workspace, which turns "revoke the agent's
+      // token" into a job that silently leaves five others valid. Minting a
+      // replacement is the moment the old one stops being needed.
+      const replaced = await q<{ id: string }>(
+        `update api_tokens set revoked_at = now()
+          where actor_id = $1 and revoked_at is null
+        returning id`,
+        [agent.id],
+      );
       await q(
         `insert into api_tokens (actor_id, name, token_hash, created_by) values ($1, $2, $3, $4)`,
         [agent.id, `${req.actor.handle}'s agent`, sha256(token), req.actor.id],
       );
-      return reply.code(201).send({ token, agent_handle: agent.handle });
+      return reply
+        .code(201)
+        .send({ token, agent_handle: agent.handle, replaced: replaced.length });
     });
   });
 }

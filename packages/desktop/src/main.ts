@@ -268,7 +268,15 @@ const agentTokenFile = () => join(app.getPath("userData"), "agent-token.json");
  * be signed in to several. Keyed by server URL, which is what identifies a
  * workspace here — one server, one workspace.
  */
-type AgentTokens = { byServer?: Record<string, string>; token?: string };
+type AgentTokens = {
+  /** Keyed by workspace id — what the credential is actually scoped to. */
+  byWorkspace?: Record<string, string>;
+  /** The earlier keying, by server URL. Read for anything stored before, and
+   *  promoted to byWorkspace the first time the id is known, because one
+   *  workspace answering to two addresses filed two credentials under it. */
+  byServer?: Record<string, string>;
+  token?: string;
+};
 
 function readAgentTokens(): AgentTokens {
   try {
@@ -280,8 +288,20 @@ function readAgentTokens(): AgentTokens {
 
 function storedAgentToken(serverUrl?: string | null): string | null {
   const raw = readAgentTokens();
+  const ws = storedWorkspaceId();
+  if (ws && raw.byWorkspace?.[ws]) return raw.byWorkspace[ws]!;
+
+  // Fall back to the address it was filed under before ids were recorded, and
+  // promote it once, so the next lookup finds it whichever name the window is
+  // using. This is what stops a second hostname re-minting a credential the
+  // workspace already has.
   const key = serverUrl ?? storedServer();
-  if (key && raw.byServer?.[key]) return raw.byServer[key]!;
+  const byUrl = key ? raw.byServer?.[key] : undefined;
+  if (byUrl) {
+    if (ws) storeAgentToken(byUrl);
+    return byUrl;
+  }
+
   // The pre-multi-workspace file held a single token with no server attached.
   // It belongs to whichever workspace was signed in at the time — and with no
   // way to tell which, it may only stand in while there is still just one.
@@ -290,19 +310,35 @@ function storedAgentToken(serverUrl?: string | null): string | null {
 }
 
 function storeAgentToken(token: string | null, serverUrl?: string | null) {
-  const key = serverUrl ?? storedServer();
   const raw = readAgentTokens();
+  const ws = storedWorkspaceId();
+  const key = serverUrl ?? storedServer();
+
+  const byWorkspace = { ...(raw.byWorkspace ?? {}) };
   const byServer = { ...(raw.byServer ?? {}) };
-  if (key) {
+
+  if (ws) {
+    if (token) byWorkspace[ws] = token;
+    else delete byWorkspace[ws];
+    // Every address this workspace has been reached at stops holding its own
+    // copy. Leaving them would re-introduce exactly the duplicate this is
+    // meant to end, and a stale one is worse than none: it answers 401.
+    for (const url of Object.keys(byServer)) {
+      if (byServer[url] === token || url === key) delete byServer[url];
+    }
+  } else if (key) {
+    // No id yet — first run, or a window that has not reached /me. File it by
+    // address and let the next lookup promote it.
     if (token) byServer[key] = token;
     else delete byServer[key];
   }
+
   mkdirSync(app.getPath("userData"), { recursive: true });
   writeFileSync(
     agentTokenFile(),
-    // The legacy single token is dropped once a keyed one exists for the same
-    // server, so it cannot later be mistaken for a different workspace's.
-    JSON.stringify({ byServer }, null, 2),
+    // The legacy single token is dropped once a keyed one exists, so it cannot
+    // later be mistaken for a different workspace's.
+    JSON.stringify({ byWorkspace, ...(Object.keys(byServer).length ? { byServer } : {}) }, null, 2),
     { mode: 0o600 },
   );
 }
@@ -311,18 +347,49 @@ function storeAgentToken(token: string | null, serverUrl?: string | null) {
  *  so it survives a packaged build that has no .env.local to read. */
 const serverFile = () => join(app.getPath("userData"), "server.json");
 
-function storedServer(): string | null {
+function readServerFile(): { url?: string; workspaceId?: string } {
   try {
-    const raw = JSON.parse(readFileSync(serverFile(), "utf8")) as { url?: string };
-    return typeof raw.url === "string" && raw.url ? raw.url : null;
+    return JSON.parse(readFileSync(serverFile(), "utf8")) as { url?: string; workspaceId?: string };
   } catch {
-    return null;
+    return {};
   }
 }
 
-function storeServer(url: string | null) {
+function storedServer(): string | null {
+  const raw = readServerFile();
+  return typeof raw.url === "string" && raw.url ? raw.url : null;
+}
+
+/**
+ * Which workspace the window is signed in to, as opposed to which address it
+ * reached it at.
+ *
+ * These came apart the moment a server answered to two names — a custom
+ * domain and the host's generated one — and the agent credential, keyed by
+ * URL, was minted twice for one workspace. The workspace id is what a
+ * credential is actually scoped to, so it is what the credential is filed
+ * under.
+ */
+function storedWorkspaceId(): string | null {
+  const raw = readServerFile();
+  return typeof raw.workspaceId === "string" && raw.workspaceId ? raw.workspaceId : null;
+}
+
+function storeServer(url: string | null, workspaceId?: string | null) {
   mkdirSync(app.getPath("userData"), { recursive: true });
-  writeFileSync(serverFile(), JSON.stringify({ url }, null, 2));
+  // Who knows the id and who does not: the picker sets an address before
+  // anyone has signed in, and the window supplies the id a moment later when
+  // /me answers. So an unspecified id is carried over — but only while the
+  // address is unchanged. Pointing at a different server with the previous
+  // workspace's id still attached would file, and find, that workspace's
+  // credential under the new one.
+  const keep =
+    workspaceId !== undefined
+      ? workspaceId
+      : url && url === storedServer()
+        ? storedWorkspaceId()
+        : null;
+  writeFileSync(serverFile(), JSON.stringify({ url, ...(keep ? { workspaceId: keep } : {}) }, null, 2));
 }
 
 
@@ -1041,9 +1108,12 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle("server:get", () => storedServer());
-  ipcMain.handle("server:set", (_e, url: unknown) => {
+  ipcMain.handle("server:set", (_e, url: unknown, workspaceId?: unknown) => {
     const before = envFingerprint();
-    storeServer(typeof url === "string" && url ? url : null);
+    storeServer(
+      typeof url === "string" && url ? url : null,
+      typeof workspaceId === "string" && workspaceId ? workspaceId : undefined,
+    );
     // Staleness used to be decided once, when a pane mounted. That is too
     // early: switching workspace reloads the renderer, the panes reattach
     // immediately, and this call only arrives afterwards — once /me has come
