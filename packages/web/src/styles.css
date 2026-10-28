@@ -400,6 +400,23 @@ button { font: inherit; cursor: pointer; }
 .tab:hover { color: var(--fg-dim); }
 .tab.active { color: var(--fg); border-bottom-color: var(--accent); }
 
+/* An agent tab carries its own close control, so the pair underlines as one
+   rather than the label alone. */
+.tab-wrap { display: inline-flex; align-items: center; border-bottom: 2px solid transparent; }
+.tab-wrap.active { border-bottom-color: var(--accent); }
+.tab-wrap .tab { border-bottom: 0; padding-right: 3px; }
+.tab-close {
+  background: none; border: 0; color: var(--fg-faint); cursor: pointer;
+  font-size: 12px; line-height: 1; padding: 3px 7px 4px 2px; opacity: 0;
+}
+.tab-wrap:hover .tab-close, .tab-wrap.active .tab-close { opacity: 1; }
+.tab-close:hover { color: var(--danger); }
+.tab-add {
+  background: none; border: 0; color: var(--fg-faint); cursor: pointer;
+  font-size: 13px; line-height: 1; padding: 3px 7px 4px; margin-left: 2px;
+}
+.tab-add:hover { color: var(--fg); }
+
 /* -------------------------------- widgets ------------------------------- */
 
 .widget {
