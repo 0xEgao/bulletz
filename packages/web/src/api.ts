@@ -208,7 +208,14 @@ export class Api {
     this.call<{ code: string; handle: string; expires_at: string }>("POST", `/members/${id}/reset`, {});
   onboarding = () => this.call<import("./Onboarding.tsx").OnboardingState>("GET", "/onboarding");
   createAgentToken = () =>
-    this.call<{ token: string; agent_handle: string }>("POST", "/onboarding/agent-token", {});
+    this.call<{ token: string; agent_handle: string; expires_at?: string; replaced?: number }>(
+      "POST",
+      "/onboarding/agent-token",
+      {},
+    );
+  /** Hand the agent's credential back — what signing out does, so a bearer
+   *  token does not outlive the login that authorised it. */
+  revokeAgentToken = () => this.call<{ revoked: number }>("DELETE", "/onboarding/agent-token");
   members = () => this.call<{ members: Member[] }>("GET", "/members");
   invites = () => this.call<{ invites: Invite[] }>("GET", "/invites");
   createInvite = (role: string, note?: string) =>

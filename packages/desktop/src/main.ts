@@ -268,13 +268,17 @@ const agentTokenFile = () => join(app.getPath("userData"), "agent-token.json");
  * be signed in to several. Keyed by server URL, which is what identifies a
  * workspace here — one server, one workspace.
  */
+/** A credential and, when the server told us, when it stops working. Plain
+ *  strings are what earlier versions wrote; both shapes are read. */
+type StoredCred = string | { token: string; expiresAt?: string };
+
 type AgentTokens = {
   /** Keyed by workspace id — what the credential is actually scoped to. */
-  byWorkspace?: Record<string, string>;
+  byWorkspace?: Record<string, StoredCred>;
   /** The earlier keying, by server URL. Read for anything stored before, and
    *  promoted to byWorkspace the first time the id is known, because one
    *  workspace answering to two addresses filed two credentials under it. */
-  byServer?: Record<string, string>;
+  byServer?: Record<string, StoredCred>;
   token?: string;
 };
 
@@ -286,19 +290,50 @@ function readAgentTokens(): AgentTokens {
   }
 }
 
+const credToken = (c: StoredCred | undefined): string | null =>
+  typeof c === "string" ? c || null : (c?.token ?? null);
+const credExpiry = (c: StoredCred | undefined): string | null =>
+  typeof c === "string" ? null : (c?.expiresAt ?? null);
+
+/**
+ * When a credential is close enough to expiry to be worth replacing.
+ *
+ * Renewing is one request and revokes what it replaces, so there is no cost
+ * to doing it early and a real cost to doing it late: the agent discovers the
+ * problem as a 401 in the middle of something, with no way to fix itself.
+ */
+const RENEW_WITHIN_MS = 14 * 24 * 60 * 60 * 1000;
+
+function agentCredentialStatus(): { has: boolean; expiresAt: string | null; renew: boolean } {
+  const raw = readAgentTokens();
+  const ws = storedWorkspaceId();
+  const key = storedServer();
+  const cred =
+    (ws ? raw.byWorkspace?.[ws] : undefined) ?? (key ? raw.byServer?.[key] : undefined) ?? undefined;
+  const token = credToken(cred);
+  const expiresAt = credExpiry(cred);
+  if (!token) return { has: false, expiresAt: null, renew: true };
+  // No recorded expiry means it was stored before expiries existed, which is
+  // exactly the never-expiring credential this change is retiring.
+  if (!expiresAt) return { has: true, expiresAt: null, renew: true };
+  const left = Date.parse(expiresAt) - Date.now();
+  return { has: true, expiresAt, renew: !Number.isFinite(left) || left < RENEW_WITHIN_MS };
+}
+
 function storedAgentToken(serverUrl?: string | null): string | null {
   const raw = readAgentTokens();
   const ws = storedWorkspaceId();
-  if (ws && raw.byWorkspace?.[ws]) return raw.byWorkspace[ws]!;
+  if (ws && raw.byWorkspace?.[ws]) return credToken(raw.byWorkspace[ws]);
 
   // Fall back to the address it was filed under before ids were recorded, and
   // promote it once, so the next lookup finds it whichever name the window is
   // using. This is what stops a second hostname re-minting a credential the
   // workspace already has.
   const key = serverUrl ?? storedServer();
-  const byUrl = key ? raw.byServer?.[key] : undefined;
+  const legacy = key ? raw.byServer?.[key] : undefined;
+  const byUrl = credToken(legacy);
   if (byUrl) {
-    if (ws) storeAgentToken(byUrl);
+    if (ws) storeAgentToken(byUrl, undefined, credExpiry(legacy) ?? undefined);
     return byUrl;
   }
 
@@ -309,27 +344,28 @@ function storedAgentToken(serverUrl?: string | null): string | null {
   return typeof raw.token === "string" && raw.token ? raw.token : null;
 }
 
-function storeAgentToken(token: string | null, serverUrl?: string | null) {
+function storeAgentToken(token: string | null, serverUrl?: string | null, expiresAt?: string) {
   const raw = readAgentTokens();
   const ws = storedWorkspaceId();
   const key = serverUrl ?? storedServer();
+  const value: StoredCred = expiresAt ? { token: token ?? "", expiresAt } : (token ?? "");
 
   const byWorkspace = { ...(raw.byWorkspace ?? {}) };
   const byServer = { ...(raw.byServer ?? {}) };
 
   if (ws) {
-    if (token) byWorkspace[ws] = token;
+    if (token) byWorkspace[ws] = value;
     else delete byWorkspace[ws];
     // Every address this workspace has been reached at stops holding its own
     // copy. Leaving them would re-introduce exactly the duplicate this is
     // meant to end, and a stale one is worse than none: it answers 401.
     for (const url of Object.keys(byServer)) {
-      if (byServer[url] === token || url === key) delete byServer[url];
+      if (credToken(byServer[url]) === token || url === key) delete byServer[url];
     }
   } else if (key) {
     // No id yet — first run, or a window that has not reached /me. File it by
     // address and let the next lookup promote it.
-    if (token) byServer[key] = token;
+    if (token) byServer[key] = value;
     else delete byServer[key];
   }
 
@@ -855,10 +891,18 @@ app.whenReady().then(() => {
     return true;
   });
 
-  ipcMain.handle("agent:token", (_e, token: unknown) => {
+  /** Whether a credential is held, and whether it is close enough to expiry
+   *  to be worth replacing before the agent trips over it. */
+  ipcMain.handle("agent:tokenStatus", () => agentCredentialStatus());
+
+  ipcMain.handle("agent:token", (_e, token: unknown, expiresAt?: unknown) => {
     if (token === undefined) return storedAgentToken() !== null;
     const before = envFingerprint();
-    storeAgentToken(typeof token === "string" && token ? token : null);
+    storeAgentToken(
+      typeof token === "string" && token ? token : null,
+      undefined,
+      typeof expiresAt === "string" && expiresAt ? expiresAt : undefined,
+    );
     // Minting the credential while a session is already running is the common
     // case on a first launch, and that session cannot be handed it.
     if (envFingerprint() !== before) announceEnvChange();

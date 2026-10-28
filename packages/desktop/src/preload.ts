@@ -90,9 +90,15 @@ contextBridge.exposeInMainWorld("bulletz", {
         resolved: { command: string; args: string[] } | null;
         presets: { id: string; label: string; cmd: { command: string; args: string[] }; installed: boolean }[];
       }>,
-    setToken: (token: string | null) =>
-      ipcRenderer.invoke("agent:token", token) as Promise<boolean>,
+    setToken: (token: string | null, expiresAt?: string) =>
+      ipcRenderer.invoke("agent:token", token, expiresAt) as Promise<boolean>,
     hasToken: () => ipcRenderer.invoke("agent:token") as Promise<boolean>,
+    tokenStatus: () =>
+      ipcRenderer.invoke("agent:tokenStatus") as Promise<{
+        has: boolean;
+        expiresAt: string | null;
+        renew: boolean;
+      }>,
     mcp: (action?: "connect") =>
       ipcRenderer.invoke("agent:mcp", action) as Promise<{
         dir: string;

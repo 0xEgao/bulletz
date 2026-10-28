@@ -25,6 +25,7 @@ import { bridge } from "./Terminal.tsx";
 export type CredentialOutcome =
   | { state: "present" }
   | { state: "minted"; handle: string }
+  | { state: "renewed"; handle: string }
   | { state: "unavailable"; reason: string };
 
 export async function ensureAgentCredential(api: Api): Promise<CredentialOutcome> {
@@ -32,16 +33,25 @@ export async function ensureAgentCredential(api: Api): Promise<CredentialOutcome
   // A browser tab has no pty and nowhere to keep a secret. Nothing to do.
   if (!agent?.hasToken || !agent.setToken) return { state: "unavailable", reason: "no desktop app" };
 
+  // Renew before it lapses, not after. Minting is one request that revokes
+  // what it replaces, so doing it early costs nothing — and doing it late
+  // costs the agent a 401 in the middle of a task, which it cannot fix for
+  // itself. Signing in is the regular heartbeat this rides on.
+  let renewing = false;
   try {
-    if (await agent.hasToken()) return { state: "present" };
+    const status = agent.tokenStatus
+      ? await agent.tokenStatus()
+      : { has: await agent.hasToken(), expiresAt: null, renew: false };
+    if (status.has && !status.renew) return { state: "present" };
+    renewing = status.has;
   } catch {
     return { state: "unavailable", reason: "could not read the stored credential" };
   }
 
   try {
     const r = await api.createAgentToken();
-    await agent.setToken(r.token);
-    return { state: "minted", handle: r.agent_handle };
+    await agent.setToken(r.token, r.expires_at);
+    return { state: renewing ? "renewed" : "minted", handle: r.agent_handle };
   } catch (e) {
     // A reader has no permission to mint one, and an account with no agent
     // identity has nothing to mint for. Both are fine — the agent pane still

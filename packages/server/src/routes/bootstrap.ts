@@ -4,6 +4,10 @@ import { maybeOne, one, q } from "../db.js";
 import { requireActor } from "../authHook.js";
 import { can, createSession, hashPassword, secret, sha256 } from "../identity.js";
 
+/** How long an agent credential lasts before it must be renewed. The app
+ *  renews well inside this; it is the limit on a copy nobody is tending. */
+const AGENT_TOKEN_DAYS = 90;
+
 /**
  * First run, and what to do next.
  *
@@ -144,13 +148,48 @@ export async function bootstrapRoutes(app: FastifyInstance) {
         returning id`,
         [agent.id],
       );
-      await q(
-        `insert into api_tokens (actor_id, name, token_hash, created_by) values ($1, $2, $3, $4)`,
-        [agent.id, `${req.actor.handle}'s agent`, sha256(token), req.actor.id],
+      // An expiry, now that renewal is free. A credential that never expires
+      // is one you only find out about when it leaks: it sits on a laptop
+      // outliving the login that created it, and nothing ages it out. The app
+      // renews well before this, so in normal use the date is never reached —
+      // it is the limit on a copy nobody is tending any more.
+      const minted = await one<{ expires_at: string }>(
+        `insert into api_tokens (actor_id, name, token_hash, created_by, expires_at)
+         values ($1, $2, $3, $4, now() + ($5 || ' days')::interval)
+         returning expires_at`,
+        [agent.id, `${req.actor.handle}'s agent`, sha256(token), req.actor.id, String(AGENT_TOKEN_DAYS)],
       );
-      return reply
-        .code(201)
-        .send({ token, agent_handle: agent.handle, replaced: replaced.length });
+      return reply.code(201).send({
+        token,
+        agent_handle: agent.handle,
+        expires_at: minted.expires_at,
+        replaced: replaced.length,
+      });
+    });
+
+    /**
+     * Hand the agent's credential back.
+     *
+     * Signing out revoked the person's session and left the agent's token
+     * working — a bearer credential on disk outliving the login that
+     * authorised it. That is the inverse of the impersonation this model
+     * exists to prevent: there an agent borrowed an identity, here it kept
+     * one after the person had gone.
+     */
+    secured.delete("/onboarding/agent-token", async (req, reply) => {
+      if (!can(req.actor, "write")) return reply.code(403).send({ error: "forbidden" });
+      const agent = await maybeOne<{ id: string }>(
+        `select id from actors where owner_actor_id = $1 and kind = 'agent' limit 1`,
+        [req.actor.id],
+      );
+      if (!agent) return { revoked: 0 };
+      const gone = await q<{ id: string }>(
+        `update api_tokens set revoked_at = now()
+          where actor_id = $1 and revoked_at is null
+        returning id`,
+        [agent.id],
+      );
+      return { revoked: gone.length };
     });
   });
 }

@@ -245,6 +245,16 @@ export function App() {
   const signOut = () => {
     // Revoke server-side first, but never let a failed call strand someone on
     // a screen they are trying to leave: the local credential goes either way.
+    //
+    // The agent's credential goes with it. Leaving one behind meant a bearer
+    // token on disk outliving the login that authorised it — still posting as
+    // the agent long after the person had signed out, which on a shared or
+    // handed-over machine is the whole problem. Revoked server-side so a copy
+    // taken from the file is dead too, then cleared locally.
+    void api
+      .revokeAgentToken()
+      .catch(() => {})
+      .finally(() => void bridge()?.agent?.setToken?.(null));
     void api.logout().catch(() => {});
     const current = activeAccount();
     const next = current ? removeAccount(current.id) : null;

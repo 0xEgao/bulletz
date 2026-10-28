@@ -81,8 +81,10 @@ type Bridge = {
       resolved: { command: string; args: string[] } | null;
       presets: { id: string; label: string; cmd: { command: string; args: string[] }; installed: boolean }[];
     }>;
-    setToken?: (token: string | null) => Promise<boolean>;
+    setToken?: (token: string | null, expiresAt?: string) => Promise<boolean>;
     hasToken?: () => Promise<boolean>;
+    /** Held, and whether it is near enough to expiry to replace now. */
+    tokenStatus?: () => Promise<{ has: boolean; expiresAt: string | null; renew: boolean }>;
     mcp?: (action?: "connect") => Promise<{
       dir: string;
       file: string;
