@@ -4,6 +4,7 @@ import { Api, auth, bootstrap, type Constraint, type Presence, type Project } fr
 import { ensureAgentCredential } from "./agentCredential.ts";
 import { ProjectSetup, hasSkippedProject } from "./ProjectSetup.tsx";
 import { parseInvite, inviteFromLocation, clearInviteFromLocation, holdInvite } from "./invites.ts";
+import { Markdown } from "./Markdown.tsx";
 import { Settings } from "./Settings.tsx";
 import { Connect, ServerPicker, Unreachable } from "./ServerPicker.tsx";
 import { NotificationBell, type LocalNotification } from "./Notifications.tsx";
@@ -1982,7 +1983,9 @@ function Message({
             </div>
           </div>
         ) : (
-          <div className="msg-body">{e.body}</div>
+          <div className="msg-body">
+            <Markdown text={e.body ?? ""} />
+          </div>
         )}
 
         {refs.length > 0 && !editing && (

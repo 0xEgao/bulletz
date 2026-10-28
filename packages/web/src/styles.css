@@ -400,6 +400,38 @@ button { font: inherit; cursor: pointer; }
 .tab:hover { color: var(--fg-dim); }
 .tab.active { color: var(--fg); border-bottom-color: var(--accent); }
 
+/* ------------------------------ message markup ------------------------------ */
+/* Tight by default: a chat line is not a document, so the first and last
+   blocks carry no outer margin and nothing gets a heading's worth of air. */
+.msg-body .md-p { margin: 0 0 6px; }
+.msg-body > :last-child { margin-bottom: 0; }
+.msg-body .md-h { margin: 10px 0 4px; font-size: 12.5px; font-weight: 650; }
+.msg-body > .md-h:first-child { margin-top: 0; }
+.msg-body .md-list { margin: 0 0 6px; padding-left: 20px; }
+.msg-body .md-list li { margin: 1px 0; }
+.msg-body .md-quote {
+  margin: 0 0 6px; padding: 1px 0 1px 10px; color: var(--fg-dim);
+  border-left: 2px solid var(--line);
+}
+.msg-body .md-hr { margin: 8px 0; border: 0; border-top: 1px solid var(--line); }
+.msg-body code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 11.5px; background: var(--bg-sunken, rgba(255,255,255,.06));
+  border: 1px solid var(--line); border-radius: 4px; padding: 0 4px;
+}
+/* A code block scrolls itself rather than widening the channel. */
+.msg-body .md-code {
+  margin: 0 0 6px; padding: 8px 10px; border-radius: 7px; overflow-x: auto;
+  background: var(--bg-sunken, rgba(255,255,255,.04)); border: 1px solid var(--line);
+}
+.msg-body .md-code code {
+  background: none; border: 0; padding: 0; font-size: 11.5px; line-height: 1.55;
+  white-space: pre;
+}
+.msg-body a { color: var(--accent); text-decoration: none; }
+.msg-body a:hover { text-decoration: underline; }
+.msg-body del { color: var(--fg-faint); }
+
 /* An agent tab carries its own close control, so the pair underlines as one
    rather than the label alone. */
 .tab-wrap { display: inline-flex; align-items: center; border-bottom: 2px solid transparent; }
