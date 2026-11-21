@@ -25,14 +25,18 @@ export function Apps({
   notes,
   widgets,
   me,
-  onChange,
+  onTasksChange,
+  onNotesChange,
+  onWidgetsChange,
 }: {
   api: Api;
   tasks: Task[];
   notes: Note[];
   widgets: WidgetRow[];
   me: { id: string; handle: string; role: string };
-  onChange: () => void;
+  onTasksChange: () => void;
+  onNotesChange: () => void;
+  onWidgetsChange: () => void;
 }) {
   const [sel, setSel] = useState<AppId>({ type: "builtin", id: "board" });
   const active = widgets.filter((w) => w.status === "active");
@@ -115,13 +119,13 @@ export function Apps({
 
       <div className="apps-canvas">
         {sel.type === "builtin" && sel.id === "board" && (
-          <TaskBoard api={api} tasks={tasks} onChange={onChange} />
+          <TaskBoard api={api} tasks={tasks} onChange={onTasksChange} />
         )}
         {sel.type === "builtin" && sel.id === "notes" && (
-          <Notes api={api} notes={notes} onChange={onChange} />
+          <Notes api={api} notes={notes} onChange={onNotesChange} />
         )}
         {sel.type === "builtin" && sel.id === "registry" && (
-          <Registry api={api} widgets={widgets} onChange={onChange} />
+          <Registry api={api} widgets={widgets} onChange={onWidgetsChange} />
         )}
         {sel.type === "builtin" && sel.id === "members" && <Members api={api} me={me} />}
         {sel.type === "widget" &&
@@ -129,7 +133,7 @@ export function Apps({
             const w = widgets.find((x) => x.id === sel.id);
             return w ? (
               <div className="app-full">
-                <Widget widget={w} api={api} />
+                <Widget key={w.id} widget={w} api={api} />
               </div>
             ) : (
               <div className="empty" style={{ padding: 18 }}>widget not found</div>

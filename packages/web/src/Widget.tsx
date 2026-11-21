@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Api } from "./api.ts";
 
 export type ViewSpec = {
@@ -52,31 +52,59 @@ const statusOf = (v: unknown) => {
   return STATUS[key] ?? { color: "var(--fg-faint)", glyph: "○", label: String(v ?? "unknown") };
 };
 
-export function Widget({ widget, api }: { widget: WidgetRow; api: Api }) {
+export function Widget({
+  widget,
+  api,
+  visible = true,
+}: {
+  widget: WidgetRow;
+  api: Api;
+  visible?: boolean;
+}) {
   const [rows, setRows] = useState<Row[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [ms, setMs] = useState<number | null>(null);
 
-  const load = useCallback(async () => {
-    if (!widget.tool_id) return setRows([]);
-    try {
-      const r = await api.widgetData(widget.id);
-      setRows(r.rows as Row[]);
-      setMs(r.ms);
-      setErr(null);
-    } catch (e) {
-      setErr((e as Error).message);
-    }
-  }, [api, widget.id, widget.tool_id]);
+  const inFlight = useRef<ReturnType<Api["widgetData"]> | null>(null);
 
-  // The refresh loop hits the server, never a model. A 30s tick must be free.
   useEffect(() => {
-    void load();
+    if (!visible || widget.status !== "active" || widget.kind !== "view") return;
+    if (!widget.tool_id) {
+      setRows([]);
+      setErr(null);
+      setMs(null);
+      return;
+    }
+
+    let live = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const every = widget.view?.refresh_ms;
-    if (!every) return;
-    const t = setInterval(() => void load(), every);
-    return () => clearInterval(t);
-  }, [load, widget.view?.refresh_ms]);
+    const load = async () => {
+      // An earlier effect may still have a request in flight after a
+      // collapse, reopening, or configuration change.
+      if (inFlight.current) await inFlight.current.catch(() => {});
+      if (!live) return;
+      const request = api.widgetData(widget.id);
+      inFlight.current = request;
+      try {
+        const result = await request;
+        if (!live) return;
+        setRows(result.rows as Row[]);
+        setMs(result.ms);
+        setErr(null);
+      } catch (e) {
+        if (live) setErr((e as Error).message);
+      } finally {
+        inFlight.current = null;
+        if (live && every) timer = setTimeout(() => void load(), every);
+      }
+    };
+    void load();
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [api, visible, widget.id, widget.kind, widget.status, widget.tool_id, widget.view?.refresh_ms]);
 
   return (
     <div className="widget">
@@ -99,7 +127,9 @@ export function Widget({ widget, api }: { widget: WidgetRow; api: Api }) {
             </>
           )}
         </div>
-      ) : err ? (
+      ) : widget.status === "disabled" ? (
+        <div className="widget-gate">Disabled</div>
+      ) : err && widget.kind === "view" ? (
         <div className="widget-err">{err}</div>
       ) : widget.kind === "embed" ? (
         <EmbedWidget url={widget.url} />

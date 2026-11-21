@@ -89,6 +89,11 @@ const SELECT_ACTOR = `
   a.id, a.workspace_id, a.kind, a.handle, a.display_name,
   a.owner_actor_id, a.role, a.status`;
 
+// Check the timestamp on the row being updated so concurrent requests cannot
+// all write after observing the same stale timestamp.
+const LAST_USED_IS_STALE = `
+  (last_used_at is null or last_used_at <= now() - interval '1 minute')`;
+
 /** Resolve a bearer token to an identity.
  *
  *  Three credential kinds, checked cheapest-first. A disabled actor resolves
@@ -98,23 +103,36 @@ export async function identify(token: string): Promise<Identity | null> {
   const hash = sha256(token);
 
   const session = await maybeOne<Identity & { session_id: string }>(
-    `update sessions s set last_used_at = now()
-       from actors a
-      where s.token_hash = $1 and s.actor_id = a.id
-        and s.revoked_at is null and s.expires_at > now()
-        and a.status = 'active'
-      returning ${SELECT_ACTOR}, s.id as session_id`,
+    `with credential as (
+       select ${SELECT_ACTOR}, s.id as session_id
+         from sessions s join actors a on a.id = s.actor_id
+        where s.token_hash = $1 and s.revoked_at is null and s.expires_at > now()
+          and a.status = 'active'
+     ), touch as (
+       update sessions set last_used_at = now()
+        where id = (select session_id from credential)
+          and revoked_at is null and expires_at > now()
+          and ${LAST_USED_IS_STALE}
+     )
+     select * from credential`,
     [hash],
   );
   if (session) return { ...session, via: "session", sessionId: session.session_id };
 
   const api = await maybeOne<Identity>(
-    `update api_tokens t set last_used_at = now()
-       from actors a
-      where t.token_hash = $1 and t.actor_id = a.id
-        and t.revoked_at is null and (t.expires_at is null or t.expires_at > now())
-        and a.status = 'active'
-      returning ${SELECT_ACTOR}`,
+    `with credential as (
+       select ${SELECT_ACTOR}, t.id as token_id
+         from api_tokens t join actors a on a.id = t.actor_id
+        where t.token_hash = $1 and t.revoked_at is null and (t.expires_at is null or t.expires_at > now())
+          and a.status = 'active'
+     ), touch as (
+       update api_tokens set last_used_at = now()
+        where id = (select token_id from credential)
+          and revoked_at is null and (expires_at is null or expires_at > now())
+          and ${LAST_USED_IS_STALE}
+     )
+     select id, workspace_id, kind, handle, display_name, owner_actor_id, role, status
+       from credential`,
     [hash],
   );
   if (api) return { ...api, via: "api_token" };
