@@ -16,10 +16,8 @@ export default defineConfig(({ command, mode }) => ({
     // file meant to be handed to other people. It has to be stripped here, not
     // remembered.
     ...(command === "build" ? { "import.meta.env.VITE_BULLETZ_TOKEN": "undefined" } : {}),
-    // A build for distribution must not pin a server either: the whole point
-    // of the first-run Connect screen is that the person installing it says
-    // where their workspace lives. A team building their own preconfigured
-    // binary can still pin one by building without this mode.
+    // Distribution ignores the developer's pinned server. A team can opt in
+    // to a public desktop default via VITE_BULLETZ_DEFAULT_SERVER.
     ...(mode === "package" ? { "import.meta.env.VITE_BULLETZ_URL": "undefined" } : {}),
   },
 }));

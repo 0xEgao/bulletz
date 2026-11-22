@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Decision, Event, Note, Task, Channel } from "@bulletz/shared";
-import { Api, auth, bootstrap, type Constraint, type Presence, type Project } from "./api.ts";
+import { Api, ApiError, apiServer, auth, bootstrap, type Constraint, type Presence, type Project } from "./api.ts";
 import { ensureAgentCredential } from "./agentCredential.ts";
 import { ProjectSetup, hasSkippedProject } from "./ProjectSetup.tsx";
 import { parseInvite, inviteFromLocation, clearInviteFromLocation, holdInvite } from "./invites.ts";
 import { Markdown } from "./Markdown.tsx";
 import { Settings } from "./Settings.tsx";
-import { Connect, ServerPicker, Unreachable } from "./ServerPicker.tsx";
+import { Connect, ServerPicker, Startup, Unreachable } from "./ServerPicker.tsx";
 import { NotificationBell, type LocalNotification } from "./Notifications.tsx";
 import { checkForUpdate, dismissUpdate } from "./updates.ts";
-import { clearServer, resolveServer, serverSource, setServer } from "./server.ts";
+import { clearServer, probeServer, resolveServer, setServer, type Probe } from "./server.ts";
 import {
   activeAccount,
   beginAddWorkspace,
@@ -121,53 +121,44 @@ export function App() {
   const [needsProject, setNeedsProject] = useState(false);
   const [authErr, setAuthErr] = useState("");
   const [probe, setProbe] = useState(0);
-  const [needsSetup, setNeedsSetup] = useState<boolean | null>(null);
-  const [unreachable, setUnreachable] = useState("");
+  const [connection, setConnection] = useState<Probe | null>(null);
+  const [sessionError, setSessionError] = useState("");
 
-  // Ask the server whether anyone has set this up yet, before offering a
-  // sign-in nobody can satisfy. A failure here is NOT "no setup needed": it
-  // means we never reached the server, and pretending otherwise renders a form
-  // that can only fail with nothing on screen explaining why.
   useEffect(() => {
-    if (serverSource() === "none") return;
-    void bootstrap
-      .status()
-      .then((r) => {
-        setUnreachable("");
-        setNeedsSetup(r.needsSetup);
-      })
-      .catch((e: Error) =>
-        // "Failed to fetch" is what the browser says and tells nobody
-        // anything; the useful version names the thing to check.
-        setUnreachable(
-          /failed to fetch|networkerror|load failed/i.test(e.message)
-            ? "No answer at that address. Check it is running and reachable from here."
-            : e.message || "No answer from the server.",
-        ),
-      );
+    if (!apiServer) return;
+    const controller = new AbortController();
+    void probeServer(apiServer, controller.signal).then((result) => {
+      if (!controller.signal.aborted) setConnection(result);
+    });
+    return () => controller.abort();
   }, [probe]);
 
   const api = useMemo(() => (token ? new Api(token) : null), [token]);
+  const ready = connection?.ok === true && !connection.needsSetup;
 
   useEffect(() => {
-    if (!api) return;
-    let live = true;
+    if (!api || !ready) return;
+    const controller = new AbortController();
+    const { signal } = controller;
     void (async () => {
       try {
-        const { actor } = await api.me();
-        if (!live) return;
-        setMe(actor);
+        const { actor } = await api.me(AbortSignal.any([signal, AbortSignal.timeout(6000)]));
+        if (signal.aborted) return;
+        if (!actor?.id || !actor.workspace_id) throw new Error("Invalid session response.");
 
-        // Record (or refresh) the workspace this credential belongs to. This
-        // is also the upgrade path: a pre-accounts token becomes the first
-        // account here, because only now do we know whose it is and where.
-        const project = await api.project().catch(() => null);
-        if (!live) return;
+        const b = bridge();
+        // The terminal must see the selected workspace before it first renders.
+        await b?.server?.set(api.baseUrl, actor.workspace_id);
+        if (signal.aborted) return;
+        const info = await b?.project?.get();
+        if (signal.aborted) return;
+
+        const previous = activeAccount();
         const account = upsertAccount({
-          serverUrl: resolveServer(),
+          serverUrl: api.baseUrl,
           token: api.authToken,
           workspaceId: actor.workspace_id,
-          workspaceName: project?.name ?? "Workspace",
+          workspaceName: previous?.workspaceId === actor.workspace_id ? previous.workspaceName : "Workspace",
           handle: actor.handle,
           actorId: actor.id,
           role: actor.role,
@@ -175,75 +166,83 @@ export function App() {
         clearLegacyToken();
         endAddWorkspace();
         setAddingWorkspace(false);
-        // Main runs the agent and the MCP bridge; they must follow the window.
-        // Awaited, because the agent credential below is stored per server and
-        // would otherwise be filed against whichever workspace was last open.
-        await bridge()?.server?.set(account.serverUrl, actor.workspace_id);
-        if (!live) return;
-        // And the agent in the dock gets an identity without anyone having to
-        // find the onboarding step for it.
+        setNeedsProject(Boolean(
+          info && !info.chosen && b?.project?.pick && b.project.bind && !hasSkippedProject(account.serverUrl),
+        ));
+        setMe(actor);
         void ensureAgentCredential(api);
 
-        // Ask where this workspace's code lives, once, now — while the person
-        // is still setting things up and knows the answer. Skippable; the
-        // terminal's own gate catches anyone who skips.
-        const b = bridge();
-        if (b?.project?.pick && b.project.bind) {
-          const info = await b.project.get();
-          if (!live) return;
-          if (!info.chosen && !hasSkippedProject(account.serverUrl)) setNeedsProject(true);
-        }
+        // The workspace switcher can pick up the latest name after the app opens.
+        void api.project(AbortSignal.any([signal, AbortSignal.timeout(6000)])).then((project) => {
+          const current = activeAccount();
+          if (!signal.aborted && current?.id === account.id && current.workspaceName !== project.name) {
+            upsertAccount({ ...current, workspaceName: project.name });
+          }
+        }).catch(() => {});
       } catch (e) {
-        if (!live) return;
-        setAuthErr((e as Error).message);
-        setMe(null);
-        clearLegacyToken();
-        setToken("");
+        if (signal.aborted) return;
+        if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+          setAuthErr(e.message);
+          clearLegacyToken();
+          setToken("");
+        } else {
+          setSessionError("Could not verify your session. Try again.");
+        }
       }
     })();
-    return () => {
-      live = false;
-    };
-  }, [api]);
+    return () => controller.abort();
+  }, [api, ready]);
 
-  // A downloaded app that has never been told where any workspace lives.
-  if (serverSource() === "none" && !addingWorkspace) {
-    return <Connect onConnected={() => location.reload()} />;
+  const retry = () => {
+    setConnection(null);
+    setSessionError("");
+    setProbe((n) => n + 1);
+  };
+  const cancelAdd = addingWorkspace ? () => {
+    endAddWorkspace();
+    clearServer();
+    location.reload();
+  } : undefined;
+
+  if (!apiServer) {
+    return <Connect onConnected={() => location.reload()} onCancel={cancelAdd} />;
   }
-  if (unreachable) {
-    return <Unreachable error={unreachable} onRetry={() => setProbe((n) => n + 1)} />;
+  if (sessionError || connection?.ok === false) {
+    return (
+      <Unreachable
+        server={apiServer}
+        error={connection?.ok === false ? connection.error : sessionError}
+        onRetry={retry}
+        onCancel={cancelAdd}
+      />
+    );
   }
-  if (needsSetup === null) return <div className="auth" />;
-  if (needsSetup) {
+  if (!connection) return <Startup>Connecting to the server…</Startup>;
+  if (connection.needsSetup) {
     return (
       <Setup
         onDone={(t) => {
-          setNeedsSetup(false);
+          setConnection({ ...connection, needsSetup: false });
           setToken(t);
         }}
       />
     );
   }
 
+  if (api && !me) return <Startup>Checking your session…</Startup>;
   if (!api || !me || addingWorkspace) {
     return (
       <Auth
         error={authErr}
-        // Adding a second workspace happens over a session that is still
-        // valid, so there has to be a way back to it.
-        onCancel={
-          addingWorkspace
-            ? () => {
-                endAddWorkspace();
-                clearServer();
-                // The picker may have pointed this page at another server;
-                // only a reload puts the API base back where it belongs.
-                location.reload();
-              }
-            : undefined
-        }
+        onCancel={cancelAdd}
         onSubmit={(t) => {
           setAuthErr("");
+          if (t === token) {
+            endAddWorkspace();
+            setAddingWorkspace(false);
+            return;
+          }
+          setMe(null);
           setToken(t);
         }}
       />
@@ -563,12 +562,12 @@ function Auth({
 
         <button className="send" type="submit" disabled={busy}>
           {busy
-            ? "…"
+            ? "Signing in…"
             : mode === "invite"
               ? "Create account"
               : mode === "reset"
                 ? "Set password"
-                : "Connect"}
+                : "Sign in"}
         </button>
 
         {mode === "login" && (

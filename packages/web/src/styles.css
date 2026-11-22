@@ -1527,7 +1527,6 @@ button { font: inherit; cursor: pointer; }
 .server-row input:focus { outline: none; border-color: var(--accent-line); }
 .server-row .send { flex: 0 0 auto; width: auto; padding: 6px 14px; }
 .server-err { font-size: 10.5px; color: var(--danger); line-height: 1.45; }
-.server-ok { font-size: 10.5px; color: var(--status-good); line-height: 1.45; }
 .server-hint { font-size: 10px; color: var(--fg-faint); line-height: 1.5; }
 .server-hint code {
   font-family: var(--mono); background: var(--bg-input);

@@ -7,6 +7,7 @@ import { resolveServer } from "./server.ts";
 // different server — that path is all risk and no benefit, and a workspace
 // switch is exactly the moment a clean slate is wanted.
 const BASE = resolveServer();
+export { BASE as apiServer };
 
 export type Constraint = {
   id: string;
@@ -88,8 +89,6 @@ export type Presence = {
 
 /** Unauthenticated calls: sign-in happens before there is an Api instance. */
 export const bootstrap = {
-  status: () =>
-    fetch(`${BASE}/v1/bootstrap`).then((r) => r.json() as Promise<{ needsSetup: boolean }>),
   create: (body: {
     workspace: string;
     handle: string;
@@ -133,6 +132,12 @@ async function post(path: string, body: unknown): Promise<{ token: string; expir
   return JSON.parse(text) as { token: string; expires_at: string };
 }
 
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
 export class Api {
   constructor(private token: string) {}
 
@@ -144,9 +149,10 @@ export class Api {
     return this.token;
   }
 
-  private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const res = await fetch(`${BASE}/v1${path}`, {
       method,
+      signal,
       headers: {
         authorization: `Bearer ${this.token}`,
         ...(body === undefined ? {} : { "content-type": "application/json" }),
@@ -167,7 +173,7 @@ export class Api {
       } catch {
         /* not json — show what came back */
       }
-      throw new Error(message);
+      throw new ApiError(message, res.status);
     }
     const text = await res.text();
     return text ? (JSON.parse(text) as T) : ({} as T);
@@ -227,7 +233,7 @@ export class Api {
   updateMember = (id: string, patch: { role?: string; status?: string }) =>
     this.call<{ member: Member }>("PATCH", `/members/${id}`, patch);
 
-  me = () =>
+  me = (signal?: AbortSignal) =>
     this.call<{
       actor: {
         id: string;
@@ -236,7 +242,7 @@ export class Api {
         workspace_id: string;
         role: Member["role"];
       };
-    }>("GET", "/me");
+    }>("GET", "/me", undefined, signal);
   channels = (includeArchived = false) =>
     this.call<{ channels: Channel[] }>(
       "GET",
@@ -290,7 +296,7 @@ export class Api {
 
   presence = () => this.call<{ presence: Presence[] }>("GET", "/presence");
 
-  project = () => this.call<Project>("GET", "/project");
+  project = (signal?: AbortSignal) => this.call<Project>("GET", "/project", undefined, signal);
   setProjectSummary = (summary: string) => this.call("PUT", "/project", { summary });
   addProjectLink = (l: { kind: string; label: string; url: string; notes?: string }) =>
     this.call("POST", "/project/links", l);

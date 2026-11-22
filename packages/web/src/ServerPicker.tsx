@@ -1,8 +1,19 @@
 import { useState } from "react";
-import { probeServer, normaliseServer, resolveServer, setServer, savedServer, clearServer } from "./server.ts";
+import { LOCAL_SERVER, probeServer, resolveServer, setServer, savedServer } from "./server.ts";
 import { holdInvite, parseInvite } from "./invites.ts";
 import { bridge } from "./Terminal.tsx";
 import logoUrl from "../public/logo.svg";
+import markUrl from "../public/mark.svg";
+
+export function Startup({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="startup" role="status">
+      <img src={markUrl} alt="Bulletz" width="48" height="48" />
+      <div className="startup-progress" aria-hidden="true" />
+      <span>{children}</span>
+    </div>
+  );
+}
 
 /**
  * Where the app is pointed, shown on every sign-in screen.
@@ -16,26 +27,27 @@ export function ServerPicker({ onChanged }: { onChanged: () => void }) {
   const [value, setValue] = useState(current);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [ok, setOk] = useState("");
 
   const apply = async () => {
+    if (busy) return;
     setBusy(true);
     setErr("");
-    setOk("");
     const r = await probeServer(value);
-    setBusy(false);
     if (!r.ok) {
       setErr(r.error);
+      setBusy(false);
       return;
     }
-    setOk(r.needsSetup ? "Reachable — this server has no workspace yet." : "Reachable.");
     setServer(r.url);
-    // On the desktop the agent and the MCP bridge run in the main process and
-    // must reach the same server, so the choice has to cross over.
-    await bridge()?.server?.set(r.url);
-    // A different server means different identities, so the token in hand is
-    // meaningless there. Reload clean rather than carrying it across.
-    setTimeout(onChanged, 550);
+    await bridge()?.server?.set(r.url).catch(() => {});
+    onChanged();
+  };
+
+  const reset = async () => {
+    setBusy(true);
+    setServer("");
+    await bridge()?.server?.set(null).catch(() => {});
+    onChanged();
   };
 
   if (!open) {
@@ -60,6 +72,7 @@ export function ServerPicker({ onChanged }: { onChanged: () => void }) {
           id="srv"
           value={value}
           autoFocus
+          disabled={busy}
           spellCheck={false}
           autoCapitalize="off"
           // Pre-filled with the current server so you can see what you are
@@ -70,7 +83,6 @@ export function ServerPicker({ onChanged }: { onChanged: () => void }) {
           onChange={(e) => {
             setValue(e.target.value);
             setErr("");
-            setOk("");
           }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
@@ -80,11 +92,10 @@ export function ServerPicker({ onChanged }: { onChanged: () => void }) {
           }}
         />
         <button type="button" className="send" disabled={busy || !value.trim()} onClick={() => void apply()}>
-          {busy ? "…" : "Connect"}
+          {busy ? "Checking…" : "Connect"}
         </button>
       </div>
-      {err && <div className="server-err">{err}</div>}
-      {ok && <div className="server-ok">{ok}</div>}
+      {err && <div className="server-err" role="alert">{err}</div>}
       <div className="server-hint">
         The machine running the Bulletz server. Plain hostnames get <code>https</code>;
         <code>localhost</code> gets <code>http</code>. Include a port if it is not the default.
@@ -93,10 +104,10 @@ export function ServerPicker({ onChanged }: { onChanged: () => void }) {
         <button
           type="button"
           className="linklike"
+          disabled={busy}
           onClick={() => {
             setOpen(false);
             setErr("");
-            setOk("");
             setValue(current);
           }}
         >
@@ -106,11 +117,8 @@ export function ServerPicker({ onChanged }: { onChanged: () => void }) {
           <button
             type="button"
             className="linklike"
-            onClick={() => {
-              clearServer();
-              void bridge()?.server?.set(null);
-              onChanged();
-            }}
+            disabled={busy}
+            onClick={() => void reset()}
           >
             Reset to default
           </button>
@@ -135,42 +143,47 @@ function pretty(url: string): string {
  * swallowed and the app rendered a sign-in form that could only ever fail,
  * with nothing on screen explaining why or offering a way out.
  */
-export function Unreachable({ error, onRetry }: { error: string; onRetry: () => void }) {
+export function Unreachable({
+  server,
+  error,
+  onRetry,
+  onCancel,
+}: {
+  server: string;
+  error: string;
+  onRetry: () => void;
+  onCancel?: () => void;
+}) {
   return (
     <div className="auth">
       <div className="auth-card">
         <h1>
           <img className="logo-mark" src={logoUrl} alt="bulletz.ai" />
         </h1>
-        <p>Cannot reach the server.</p>
-        <div className="auth-err">{error}</div>
-        <ServerPicker onChanged={onRetry} />
-        <button className="send" onClick={onRetry} style={{ marginTop: 10 }}>
+        <p>Couldn’t connect to <strong>{pretty(server)}</strong>.</p>
+        <div className="auth-err" role="alert">{error}</div>
+        <button type="button" className="send" onClick={onRetry}>
           Try again
         </button>
-        <div className="auth-note">
-          Running it locally? Start it with <code>npm run dev -w @bulletz/server</code>.
-        </div>
+        <ServerPicker onChanged={() => location.reload()} />
+        {onCancel && (
+          <button type="button" className="linklike auth-cancel" onClick={onCancel}>
+            Back to your workspace
+          </button>
+        )}
       </div>
     </div>
   );
 }
 
 
-/**
- * First launch of a downloaded app.
- *
- * There is no sensible default here and pretending otherwise is worse than
- * asking: a packaged app loads over file://, so there is no origin to infer
- * from, and falling back to localhost only produces an error screen as the
- * very first thing a new user sees. So the first question is the real one.
- */
-export function Connect({ onConnected }: { onConnected: () => void }) {
+export function Connect({ onConnected, onCancel }: { onConnected: () => void; onCancel?: () => void }) {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  const go = async () => {
+  const go = async (raw = value) => {
+    if (busy || !raw.trim()) return;
     setBusy(true);
     setErr("");
 
@@ -178,34 +191,35 @@ export function Connect({ onConnected }: { onConnected: () => void }) {
     // this is the screen an invited person actually reaches first: they were
     // sent one link, and being asked for a hostname they were never told is
     // where that journey ends. Take the link here and carry the code through.
-    const invite = parseInvite(value);
-    const target = invite?.server ?? value;
+    const invite = parseInvite(raw);
+    const target = invite?.server ?? raw;
 
     const r = await probeServer(target);
-    setBusy(false);
     if (!r.ok) {
       setErr(r.error);
+      setBusy(false);
       return;
     }
     setServer(r.url);
     if (invite?.server) holdInvite(invite.code);
-    await bridge()?.server?.set(r.url);
+    await bridge()?.server?.set(r.url).catch(() => {});
     onConnected();
   };
 
   return (
     <div className="auth">
-      <div className="auth-card">
+      <form className="auth-card" onSubmit={(e) => { e.preventDefault(); void go(); }}>
         <h1>
           <img className="logo-mark" src={logoUrl} alt="bulletz.ai" />
         </h1>
-        <p>Connect to your workspace, or paste the invite link you were sent.</p>
+        <p>Enter a server address or paste an invite link to join a workspace.</p>
 
         <label htmlFor="connect-srv">Server address</label>
         <input
           id="connect-srv"
           value={value}
           autoFocus
+          disabled={busy}
           spellCheck={false}
           autoCapitalize="off"
           placeholder="bulletz.your-team.com — or paste an invite link"
@@ -213,33 +227,27 @@ export function Connect({ onConnected }: { onConnected: () => void }) {
             setValue(e.target.value);
             setErr("");
           }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              void go();
-            }
-          }}
         />
-        {err && <div className="auth-err">{err}</div>}
-        {!err && value.trim() && (
-          <div className="auth-note">
-            Will connect to <code>{normaliseServer(value)}</code>
-          </div>
-        )}
+        {err && <div className="auth-err" role="alert">{err}</div>}
 
-        <button className="send" disabled={busy || !value.trim()} onClick={() => void go()}>
+        <button type="submit" className="send" disabled={busy || !value.trim()}>
           {busy ? "Checking…" : "Connect"}
         </button>
 
         <div className="auth-note">
-          Bulletz is self-hosted — this is the address of the server your team runs, not an
-          account on bulletz.ai. Whoever set it up has it. Running one yourself? Try{" "}
-          <button type="button" className="linklike" onClick={() => setValue("localhost:4000")}>
-            localhost:4000
+          <button type="button" className="linklike" disabled={busy} onClick={() => {
+            setValue(LOCAL_SERVER);
+            void go(LOCAL_SERVER);
+          }}>
+            Use local server
           </button>
-          .
         </div>
-      </div>
+        {onCancel && (
+          <button type="button" className="linklike auth-cancel" disabled={busy} onClick={onCancel}>
+            Back to your workspace
+          </button>
+        )}
+      </form>
     </div>
   );
 }

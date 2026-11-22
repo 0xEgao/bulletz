@@ -1,0 +1,41 @@
+.startup {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  background: #0b0b0c;
+  color: #9a9aa2;
+  font: 13px system-ui, sans-serif;
+}
+
+.startup-progress {
+  width: 72px;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: #27272b;
+}
+
+.startup-progress::after {
+  content: "";
+  display: block;
+  width: 24px;
+  height: 100%;
+  border-radius: inherit;
+  background: #e8e8ec;
+  animation: startup-progress 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes startup-progress {
+  to { transform: translateX(48px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .startup-progress::after {
+    animation: none;
+    margin-inline: auto;
+  }
+}
