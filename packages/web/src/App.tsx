@@ -81,7 +81,7 @@ function tombstone(e: Event): { who: string | undefined; note: string } {
 }
 
 const AGENT_UNAVAILABLE = {
-  "no-session": "_No agent session running. Open the Agent tab below._",
+  "no-session": "_No agent session running. Open or start an Agent tab below._",
   // Naming the fix matters: the session is right there and looks alive, so
   // "no agent" would read as a lie.
   stale: "_The agent session below was started against a different workspace. Restart it from the Agent tab and ask again._",
@@ -1289,6 +1289,8 @@ function Workspace({
  *  ground, and none of this is. Transcripts never leave the machine and the
  *  list is scoped to the person who ran them. */
 
+type DockSession = { id: string; label: string; kind?: "shell" | "agent" };
+
 function TerminalDock({
   onAgentReady,
 }: {
@@ -1316,10 +1318,10 @@ function TerminalDock({
    * The first keeps the id "agent" so an existing session reattaches rather
    * than being orphaned by this change.
    */
-  const [agents, setAgents] = useState<{ id: string; label: string }[]>(() => {
+  const [sessions, setSessions] = useState<DockSession[]>(() => {
     try {
       const raw = JSON.parse(localStorage.getItem("bulletz.dockAgents") ?? "null") as
-        | { id: string; label: string }[]
+        | DockSession[]
         | null;
       if (Array.isArray(raw) && raw.length) return raw;
     } catch {
@@ -1335,31 +1337,31 @@ function TerminalDock({
   useEffect(() => localStorage.setItem("bulletz.termH", String(height)), [height]);
   useEffect(() => localStorage.setItem("bulletz.termOpen", open ? "1" : "0"), [open]);
   useEffect(() => localStorage.setItem("bulletz.dockTab", tab), [tab]);
-  useEffect(() => localStorage.setItem("bulletz.dockAgents", JSON.stringify(agents)), [agents]);
+  useEffect(() => localStorage.setItem("bulletz.dockAgents", JSON.stringify(sessions)), [sessions]);
 
   // A tab pointing at a session that is no longer here — closed in another
   // window, or removed below — must not leave the dock showing nothing.
   useEffect(() => {
-    if (tab !== "terminal" && !agents.some((a) => a.id === tab)) setTab("terminal");
-  }, [agents, tab]);
+    if (tab !== "terminal" && !sessions.some((session) => session.id === tab)) setTab("terminal");
+  }, [sessions, tab]);
 
-  const addAgent = () => {
-    // Ids have to be stable across reloads, because that is what reattaches a
-    // session to its pty. Highest-numbered rather than count-based, so closing
-    // the middle one does not hand its id to the next.
-    const n =
-      agents.reduce((max, a) => Math.max(max, Number(/\d+$/.exec(a.id)?.[0] ?? 1)), 1) + 1;
-    const next = { id: `agent-${n}`, label: `Agent ${n}` };
-    setAgents((prev) => [...prev, next]);
+  const addTab = (kind: "shell" | "agent") => {
+    const n = sessions.reduce(
+      (max, session) => Math.max(max, Number(/\d+$/.exec(session.label)?.[0] ?? 1)),
+      1,
+    ) + 1;
+    const next = { id: crypto.randomUUID(), label: `${kind === "shell" ? "Terminal" : "Agent"} ${n}`, kind };
+    setSessions((prev) => [...prev, next]);
     setTab(next.id);
+    setOpen(true);
   };
 
-  const closeAgent = (id: string) => {
+  const closeTab = (id: string) => {
     // Closing a tab ends the session. A pane going away does not — that is
     // what keeps a job alive across a reload — so this has to be explicit.
     void bridge()?.term?.kill?.(id);
-    setAgents((prev) => {
-      const rest = prev.filter((a) => a.id !== id);
+    setSessions((prev) => {
+      const rest = prev.filter((session) => session.id !== id);
       if (tab === id) setTab(rest[0]?.id ?? "terminal");
       // Never leave the row with no agent at all: the empty state would be a
       // dock that cannot do the thing it is for.
@@ -1400,18 +1402,18 @@ function TerminalDock({
             >
               Terminal
             </button>
-            {agents.map((a) => (
-              <span key={a.id} className={`tab-wrap${tab === a.id ? " active" : ""}`}>
-                <button className={`tab${tab === a.id ? " active" : ""}`} onClick={() => setTab(a.id)}>
-                  {a.label}
+            {sessions.map((session) => (
+              <span key={session.id} className={`tab-wrap${tab === session.id ? " active" : ""}`}>
+                <button className={`tab${tab === session.id ? " active" : ""}`} onClick={() => setTab(session.id)}>
+                  {session.label}
                 </button>
-                {agents.length > 1 && (
+                {(sessions.length > 1 || session.kind === "shell") && (
                   <button
                     className="tab-close"
-                    title={`End ${a.label}`}
+                    title={`End ${session.label}`}
                     onClick={(e) => {
                       e.stopPropagation();
-                      closeAgent(a.id);
+                      closeTab(session.id);
                     }}
                   >
                     ×
@@ -1419,9 +1421,16 @@ function TerminalDock({
                 )}
               </span>
             ))}
-            <button className="tab-add" title="Another agent session" onClick={addAgent}>
-              +
-            </button>
+            {desktop && (
+              <>
+                <button className="tab-add" title="New terminal tab" aria-label="New terminal tab" onClick={() => addTab("shell")}>
+                  +
+                </button>
+                <button className="tab-add tab-add-agent" onClick={() => addTab("agent")}>
+                  New agent
+                </button>
+              </>
+            )}
           </div>
           <button className="icon-btn" onClick={() => setOpen((v) => !v)} title={open ? "Hide" : "Show"}>
             {open ? "\u2013" : "+"}
@@ -1432,15 +1441,19 @@ function TerminalDock({
         <div className="dock-body" hidden={!open || tab !== "terminal"}>
           <TerminalPane id="main" />
         </div>
-        {/* Only the agent in view is mounted, which is what makes "send this
-            to the agent" unambiguous when several are running: the writer
-            belongs to whichever one you are looking at. Their ptys outlive
-            the panes, so switching tabs costs a replay and nothing else. */}
+        {/* Keep the PTY across tab switches. Only a configured agent tab
+            exposes a writer for "Send to agent". */}
         {open &&
-          agents.map(
-            (a) =>
-              tab === a.id && (
-                <TerminalPane key={a.id} id={a.id} kind="agent" onReady={onAgentReady} />
+          sessions.map(
+            (session) =>
+              tab === session.id && (
+                <TerminalPane
+                  key={session.id}
+                  id={session.id}
+                  kind={session.kind ?? "agent"}
+                  autoFocus
+                  onReady={session.kind === "shell" ? undefined : onAgentReady}
+                />
               ),
           )}
       </div>

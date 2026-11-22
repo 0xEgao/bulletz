@@ -448,6 +448,7 @@ button { font: inherit; cursor: pointer; }
   font-size: 13px; line-height: 1; padding: 3px 7px 4px; margin-left: 2px;
 }
 .tab-add:hover { color: var(--fg); }
+.tab-add-agent { font-size: 10.5px; white-space: nowrap; }
 
 /* -------------------------------- widgets ------------------------------- */
 

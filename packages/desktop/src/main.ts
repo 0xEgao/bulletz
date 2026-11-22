@@ -830,6 +830,7 @@ app.whenReady().then(() => {
         shell: "",
         replay: "",
         reattached: false,
+        needsAgent: true,
         error:
           "No coding agent found. Set one in Settings — any CLI agent works; " +
           `we looked for ${AGENT_PRESETS.map((p) => p.cmd.command).join(", ")}.`,
