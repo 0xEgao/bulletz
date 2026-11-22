@@ -85,9 +85,10 @@ To open the desktop app from source:
 npm run dev:desktop
 ```
 
-This builds and loads the renderer inside Electron. It opens on its own and
-connects to the saved server, or to `http://localhost:4000` by default.
-For a local backend, start it separately with `npm run dev:server`.
+This builds and loads the renderer inside Electron. On first launch, enter a
+server address or paste an invite link. Bulletz reconnects to your saved
+server on later launches. For a local backend, run `npm run dev:server` and
+choose **Use local server**.
 To opt into hot reload, run `npm run dev:web` and launch with
 `BULLETZ_DEV_URL=http://localhost:5174 npm run dev:desktop`.
 
@@ -119,10 +120,6 @@ npm run package -w @bulletz/desktop
 ```
 
 Produces unsigned `.dmg` and `.zip` for arm64 and x64 in `packages/desktop/release/`. The build strips `VITE_BULLETZ_TOKEN` and refuses to package if any credential is found in the bundle.
-
-To preconfigure the first launch of a desktop build, set
-`VITE_BULLETZ_DEFAULT_SERVER` to your server’s public URL when building.
-Users can change it from the connection or sign-in screen.
 
 Publishing a GitHub release tagged `v<version>` builds the binaries in CI and
 attaches them: macOS (arm64 and x64), a Linux AppImage, and a Windows installer.

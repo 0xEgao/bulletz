@@ -16,8 +16,7 @@ export default defineConfig(({ command, mode }) => ({
     // file meant to be handed to other people. It has to be stripped here, not
     // remembered.
     ...(command === "build" ? { "import.meta.env.VITE_BULLETZ_TOKEN": "undefined" } : {}),
-    // Distribution ignores the developer's pinned server. A team can opt in
-    // to a public desktop default via VITE_BULLETZ_DEFAULT_SERVER.
+    // Distribution ignores the developer's pinned web server.
     ...(mode === "package" ? { "import.meta.env.VITE_BULLETZ_URL": "undefined" } : {}),
   },
 }));

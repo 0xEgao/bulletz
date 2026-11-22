@@ -120,7 +120,7 @@ export function ServerPicker({ onChanged }: { onChanged: () => void }) {
             disabled={busy}
             onClick={() => void reset()}
           >
-            Reset to default
+            {bridge() ? "Forget server" : "Reset to default"}
           </button>
         )}
       </div>

@@ -40,16 +40,13 @@ export function resolveServer(): string {
   const desktop = (globalThis as unknown as {
     bulletz?: { initialServer?: string | null };
   }).bulletz;
-  if (saved === null && desktop?.initialServer) return normaliseServer(desktop.initialServer);
+  if (desktop) {
+    return saved === null ? normaliseServer(desktop.initialServer ?? "") : "";
+  }
+
   const pinned = import.meta.env.VITE_BULLETZ_URL as string | undefined;
   if (pinned) return normaliseServer(pinned);
-  if (desktop) {
-    const defaultServer = import.meta.env.VITE_BULLETZ_DEFAULT_SERVER as string | undefined;
-    if (defaultServer) return normaliseServer(defaultServer);
-  }
-  if (import.meta.env.DEV || (desktop && import.meta.env.MODE === "desktop")) {
-    return LOCAL_SERVER;
-  }
+  if (import.meta.env.DEV) return LOCAL_SERVER;
   return /^https?:$/.test(location.protocol) ? location.origin : "";
 }
 
