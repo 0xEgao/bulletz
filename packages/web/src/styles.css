@@ -169,7 +169,7 @@ button { font: inherit; cursor: pointer; }
 }
 .avatar.agent { background: #221c2e; color: var(--agent); }
 .msg-main { min-width: 0; flex: 1; max-width: 100%; }
-.msg-head { display: flex; align-items: baseline; gap: 8px; }
+.msg-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
 .msg-who { font-weight: 600; font-size: 12.5px; }
 .msg-who.agent { color: var(--agent); }
 .badge {

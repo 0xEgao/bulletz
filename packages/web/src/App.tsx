@@ -38,6 +38,25 @@ const initials = (h: string) => h.replace(/^agent-/, "").slice(0, 2).toUpperCase
 const time = (iso: string) =>
   new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
+const chatDateTime = new Intl.DateTimeFormat(undefined, {
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+
+function ChatTimestamp({ value, className }: { value: string; className?: string }) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+
+  return (
+    <time className={className} dateTime={date.toISOString()}>
+      {chatDateTime.format(date)}
+    </time>
+  );
+}
+
 /**
  * Who wrote the message a tombstone replaces, and who took it down.
  *
@@ -1464,7 +1483,7 @@ function Stream({
               <div className="msg-main">
                 <div className="msg-head">
                   <span className="msg-who">{t.who}</span>
-                  <span className="msg-time">{time(e.created_at)}</span>
+                  <ChatTimestamp className="msg-time" value={e.created_at} />
                 </div>
                 <div className="msg-deleted">{t.note}</div>
               </div>
@@ -1506,7 +1525,7 @@ function Stream({
               {e.body}
               {why && <div className="sysev-why">why: {why}</div>}
               <div className="sysev-who">
-                {e.actor_handle} · {time(e.created_at)}
+                {e.actor_handle} · <ChatTimestamp value={e.created_at} />
               </div>
             </div>
           </div>
@@ -1843,6 +1862,7 @@ function ThreadPanel({
                 <div className="msg-main">
                   <div className="msg-head">
                     <span className="msg-who">{tombstone(r).who}</span>
+                    <ChatTimestamp className="msg-time" value={r.created_at} />
                   </div>
                   <div className="msg-deleted">{tombstone(r).note}</div>
                 </div>
@@ -1956,7 +1976,7 @@ function Message({
         <div className="msg-head">
           <span className={`msg-who${isAgent ? " agent" : ""}`}>{e.actor_handle}</span>
           {isAgent && <span className="badge">agent</span>}
-          <span className="msg-time">{time(e.created_at)}</span>
+          <ChatTimestamp className="msg-time" value={e.created_at} />
           {e.edited && <span className="msg-edited" title="edited — earlier versions remain in the log">edited</span>}
           {!editing && (
             <span className={`msg-actions${confirming ? " confirming" : ""}`}>
@@ -2081,7 +2101,9 @@ function Message({
           (e.reply_count ?? 0) > 0 ? (
             <button className="reply-count" onClick={() => onOpenThread(e.id)}>
               {e.reply_count} {e.reply_count === 1 ? "reply" : "replies"}
-              {e.last_reply_at && <span className="reply-when">· last {time(e.last_reply_at)}</span>}
+              {e.last_reply_at && (
+                <span className="reply-when">· last <ChatTimestamp value={e.last_reply_at} /></span>
+              )}
             </button>
           ) : (
             <button className="reply-start" onClick={() => onOpenThread(e.id)}>
