@@ -30,14 +30,27 @@ const REPLY_STATS = `
  *  place in the conversation instead of jumping to the end. */
 const HEAD_ONLY = `not exists (select 1 from events n where n.revision_of = e.id)`;
 
-const ROOT_CTE = `
-  with recursive chain as (
-    select id, revision_of, id as root_id, seq as root_seq from events where revision_of is null
+// Walk backward from the few events already selected for the response.
+const EVENT_ANCESTORS = `
+  ancestors as (
+    select id as rid, id, revision_of from candidates
     union all
-    select e.id, e.revision_of, c.root_id, c.root_seq
-      from events e join chain c on e.revision_of = c.id
-  )
-  select id as rid, root_id, root_seq from chain`;
+    select a.rid, e.id, e.revision_of
+      from ancestors a join events e on e.id = a.revision_of
+     where e.workspace_id = $1
+  ), roots as (
+    select rid, id as root_id from ancestors where revision_of is null
+  )`;
+
+// Walk forward from selected conversation roots, keeping their original order.
+const EVENT_REVISIONS = `
+  revisions as (
+    select id as rid, id as root_id, seq as root_seq from candidates
+    union all
+    select e.id, r.root_id, r.root_seq
+      from revisions r join events e on e.revision_of = r.rid
+     where e.workspace_id = $1
+  )`;
 
 /* -------------------------------- channels -------------------------------- */
 
@@ -110,12 +123,12 @@ export async function appendEvent(input: {
   replyTo?: string | null;
 }): Promise<Event> {
   const row = await one<Event>(
-    `with ins as (
+    `with recursive candidates as (
        insert into events (workspace_id, channel_id, actor_id, kind, body, payload, refs, labels, revision_of, reply_to)
        values ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::text[], $9, $10)
        returning *
-     ), roots as (${ROOT_CTE})
-     select ${EVENT_COLS}, ${REPLY_STATS} from ins e
+     ), ${EVENT_ANCESTORS}
+     select ${EVENT_COLS}, ${REPLY_STATS} from candidates e
        join actors a on a.id = e.actor_id
        left join roots r on r.rid = e.id`,
     [
@@ -144,18 +157,19 @@ export async function channelEvents(
 ): Promise<Event[]> {
   const limit = opts.limit ?? 100;
   const rows = await q<Event>(
-    `with roots as (${ROOT_CTE})
+    `with recursive candidates as (
+       select e.id, e.seq from events e
+        where e.workspace_id = $1 and e.channel_id = $2
+          and e.revision_of is null and e.reply_to is null
+          and ($3::bigint is null or e.seq < $3::bigint)
+        order by e.seq desc limit $4
+     ), ${EVENT_REVISIONS}
      select ${EVENT_COLS}, ${REPLY_STATS}
-       from events e
+       from revisions r
+       join events e on e.id = r.rid
        join actors a on a.id = e.actor_id
-       left join roots r on r.rid = e.id
-      where e.workspace_id = $1 and e.channel_id = $2
-        and ${HEAD_ONLY}
-        -- the channel shows top-level messages only; replies live in their
-        -- own thread and would otherwise flood the room
-        and e.reply_to is null
-        and ($3::bigint is null or coalesce(r.root_seq, e.seq) < $3::bigint)
-      order by coalesce(r.root_seq, e.seq) desc limit $4`,
+      where ${HEAD_ONLY}
+      order by r.root_seq desc limit $4`,
     [workspaceId, channelId, opts.beforeSeq ?? null, limit],
   );
   return rows.reverse();
@@ -167,17 +181,28 @@ export async function threadEvents(
   rootId: string,
 ): Promise<{ root: Event | null; replies: Event[] }> {
   const rows = await q<Event>(
-    `with roots as (${ROOT_CTE})
+    `with recursive thread_message as (
+       select id, seq as root_seq from events
+        where workspace_id = $1 and id = $2
+          and revision_of is null and reply_to is null
+       union all
+       select e.id, t.root_seq from events e join thread_message t on e.revision_of = t.id
+        where e.workspace_id = $1
+     ), candidates as (
+       -- Older replies can point to the version of the message they replied to.
+       select e.id, e.seq from events e join thread_message t on e.reply_to = t.id
+        where e.workspace_id = $1 and e.revision_of is null
+     ), ${EVENT_REVISIONS}, thread_events as (
+       select id as rid, $2::uuid as root_id, root_seq from thread_message
+       union all
+       select rid, root_id, root_seq from revisions
+     )
      select ${EVENT_COLS}, ${REPLY_STATS}
-       from events e
+       from thread_events r
+       join events e on e.id = r.rid
        join actors a on a.id = e.actor_id
-       left join roots r on r.rid = e.id
-      where e.workspace_id = $1
-        and (coalesce(r.root_id, e.id) = $2::uuid or e.reply_to = $2::uuid)
-        and ${HEAD_ONLY}
-      -- order by the ROOT's seq, so editing a reply keeps its place in the
-      -- thread rather than moving it to the end
-      order by coalesce(r.root_seq, e.seq)`,
+      where ${HEAD_ONLY}
+      order by r.root_seq`,
     [workspaceId, rootId],
   );
   const root = rows.find((r) => !r.reply_to) ?? null;
@@ -186,13 +211,15 @@ export async function threadEvents(
 
 export async function recentEvents(workspaceId: string, limit = 50): Promise<Event[]> {
   const rows = await q<Event>(
-    `with roots as (${ROOT_CTE})
+    `with recursive candidates as (
+       select e.* from events e where e.workspace_id = $1 and ${HEAD_ONLY}
+        order by e.seq desc limit $2
+     ), ${EVENT_ANCESTORS}
      select ${EVENT_COLS}
-       from events e
+       from candidates e
        join actors a on a.id = e.actor_id
        left join roots r on r.rid = e.id
-      where e.workspace_id = $1 and ${HEAD_ONLY}
-      order by e.seq desc limit $2`,
+      order by e.seq desc`,
     [workspaceId, limit],
   );
   return rows.reverse();
@@ -552,6 +579,7 @@ export async function retireProjectLink(workspaceId: string, label: string) {
 export async function eventHead(workspaceId: string, eventId: string) {
   return maybeOne<{
     id: string;
+    root_id: string;
     actor_id: string;
     kind: string;
     channel_id: string | null;
@@ -564,10 +592,12 @@ export async function eventHead(workspaceId: string, eventId: string) {
        union all
        select e.id, e.revision_of, e.actor_id, e.kind, e.channel_id, e.body, e.reply_to, e.workspace_id
          from events e join chain c on e.revision_of = c.id
-     )
-     select id, actor_id, kind, channel_id, body, reply_to from chain c
-      where not exists (select 1 from events n where n.revision_of = c.id)
-      limit 1`,
+        where e.workspace_id = $1
+     ), candidates as (
+       select * from chain e where ${HEAD_ONLY} limit 1
+     ), ${EVENT_ANCESTORS}
+     select e.id, coalesce(r.root_id, e.id) as root_id, e.actor_id, e.kind, e.channel_id, e.body, e.reply_to
+       from candidates e left join roots r on r.rid = e.id`,
     [workspaceId, eventId],
   );
 }

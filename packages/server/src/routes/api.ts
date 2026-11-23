@@ -185,7 +185,7 @@ export async function apiRoutes(app: FastifyInstance) {
       if (root.reply_to) {
         return reply.code(400).send({ error: "replies are one level deep; reply to the thread root" });
       }
-      replyTo = root.id;
+      replyTo = root.root_id;
       channelId = root.channel_id;
     }
 

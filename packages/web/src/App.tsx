@@ -685,32 +685,37 @@ function Workspace({
   const [connected, setConnected] = useState(false);
   const [socket, setSocket] = useState<WebSocket | null>(null);
   const [peerId, setPeerId] = useState<string | null>(null);
+  const threadEvent = useRef<((event: Event) => void) | null>(null);
+  const showOnboarding = useRef(!onboardDismissed);
+  showOnboarding.current = !onboardDismissed;
   const activeRef = useRef<string | null>(null);
   activeRef.current = activeId;
 
-  const refreshMemory = useCallback(async () => {
-    const [d, c, t, n, p, w, proj] = await Promise.all([
-      api.decisions(),
-      api.constraints(),
-      api.tasks(),
-      api.notes(true),
-      api.presence(),
-      api.widgets(),
-      api.project(),
-    ]);
-    setProject(proj);
-    setDecisions(d.decisions);
-    setConstraints(c.constraints);
-    setTasks(t.tasks);
-    setNotes(n.notes);
-    setPresence(p.presence);
-    setWidgets(w.widgets as WidgetRow[]);
+  const refreshData = useMemo(
+    () => ({
+      decision: () => api.decisions().then((r) => setDecisions(r.decisions)),
+      task: () => api.tasks().then((r) => setTasks(r.tasks)),
+      presence: () => api.presence().then((r) => setPresence(r.presence)),
+      widget: () => api.widgets().then((r) => setWidgets(r.widgets as WidgetRow[])),
+      notes: () => api.notes(true).then((r) => setNotes(r.notes)),
+      constraints: () => api.constraints().then((r) => setConstraints(r.constraints)),
+      project: () => api.project().then(setProject),
+    }),
+    [api],
+  );
+
+  const refreshOnboarding = useCallback(async () => {
     try {
       setOnboarding(await api.onboarding());
     } catch {
       /* an older server without the endpoint should not break the app */
     }
   }, [api]);
+
+  const refreshMemory = useCallback(async () => {
+    await Promise.all(Object.values(refreshData).map((refresh) => refresh()));
+    await refreshOnboarding();
+  }, [refreshData, refreshOnboarding]);
 
   useEffect(() => {
     void (async () => {
@@ -737,6 +742,7 @@ function Workspace({
           setPeerId((m["peer_id"] as unknown as string) ?? null);
         } else if (type === "event") {
           const ev = m["event"] as unknown as Event;
+          threadEvent.current?.(ev);
           if (ev.channel_id && ev.channel_id === activeRef.current) {
             setEvents((prev) => {
               if (prev.some((p) => p.id === ev.id)) return prev;
@@ -801,7 +807,8 @@ function Workspace({
             return next;
           });
         } else if (type === "decision" || type === "task" || type === "presence" || type === "widget") {
-          void refreshMemory();
+          void refreshData[type]().catch(() => {});
+          if (type === "decision" && showOnboarding.current) void refreshOnboarding();
         }
       },
       () => setConnected(true),
@@ -812,7 +819,7 @@ function Workspace({
       setSocket(null);
       ws.close();
     };
-  }, [api, refreshMemory]);
+  }, [api, me.id, refreshData, refreshOnboarding]);
 
   // Live status of a chat-triggered agent turn. The transcript itself arrives
   // as ordinary events over the WebSocket, because the adapter posts it into
@@ -954,14 +961,22 @@ function Workspace({
         ...(why.length ? { rationale: why.join(" -- ").trim() } : {}),
         channel_id: activeId,
       });
+      if (!connected) {
+        await refreshData.decision();
+        if (!onboardDismissed) await refreshOnboarding();
+      }
     } else if (constrain?.[1]) {
       const [rule, ...why] = constrain[1].split(/\s*--\s*/);
       await api.createConstraint({
         rule: rule!.trim(),
         ...(why.length ? { rationale: why.join(" -- ").trim() } : {}),
       });
+      await refreshData.constraints();
+      if (!onboardDismissed) await refreshOnboarding();
     } else if (about?.[1]) {
       await api.setProjectSummary(about[1].trim());
+      await refreshData.project();
+      if (!onboardDismissed) await refreshOnboarding();
     } else if (link) {
       await api.addProjectLink({
         kind: link[1]!,
@@ -969,6 +984,8 @@ function Workspace({
         url: link[3]!,
         ...(link[4] ? { notes: link[4].trim() } : {}),
       });
+      await refreshData.project();
+      if (!onboardDismissed) await refreshOnboarding();
     } else if (/^@agent\s+/.test(text)) {
       // Post the ask first, so the record shows who asked what even if the
       // agent is not running locally.
@@ -980,10 +997,10 @@ function Workspace({
       if (outcome !== "sent") await api.postMessage(activeId, AGENT_UNAVAILABLE[outcome]);
     } else if (task?.[1]) {
       await api.createTask({ title: task[1].trim(), channel_id: activeId });
+      if (!connected) await refreshData.task();
     } else {
       await api.postMessage(activeId, text);
     }
-    await refreshMemory();
   };
 
   return (
@@ -1058,7 +1075,9 @@ function Workspace({
             notes={notes}
             widgets={widgets}
             me={me}
-            onChange={refreshMemory}
+            onTasksChange={refreshData.task}
+            onNotesChange={refreshData.notes}
+            onWidgetsChange={refreshData.widget}
           />
         ) : (
         <>
@@ -1186,7 +1205,7 @@ function Workspace({
               widgets={widgets}
               api={api}
               me={me}
-              onChange={refreshMemory}
+              onChange={refreshData.widget}
               onOpenThread={setOpenThread}
               onAskAgent={askAgent}
             />
@@ -1199,10 +1218,12 @@ function Workspace({
 
         {openThread && (
           <ThreadPanel
+            key={openThread}
             rootId={openThread}
             api={api}
             me={me}
             onClose={() => setOpenThread(null)}
+            eventListener={threadEvent}
           />
         )}
 
@@ -1225,7 +1246,7 @@ function Workspace({
           <div className="pane-body" hidden={!memOpen}>
             <ProjectCard project={project} />
             <Memory decisions={decisions} constraints={constraints} tasks={tasks} />
-            <WidgetPanel widgets={widgets} api={api} onChange={refreshMemory} />
+            <WidgetPanel widgets={widgets} api={api} onChange={refreshData.widget} visible={memOpen} />
           </div>
         </div>
       </div>
@@ -1503,10 +1524,12 @@ function WidgetWithGate({
   widget,
   api,
   onChange,
+  visible,
 }: {
   widget: WidgetRow;
   api: Api;
   onChange: () => void;
+  visible: boolean;
 }) {
   const activate = async () => {
     if (widget.tool_id && widget.tool_status !== "active") await api.activateTool(widget.tool_id);
@@ -1515,7 +1538,7 @@ function WidgetWithGate({
   };
   return (
     <>
-      <Widget widget={widget} api={api} />
+      <Widget widget={widget} api={api} visible={visible} />
       {widget.status === "draft" && (
         <div className="widget-approve">
           <span>
@@ -1535,22 +1558,24 @@ function WidgetPanel({
   widgets,
   api,
   onChange,
+  visible,
 }: {
   widgets: WidgetRow[];
   api: Api;
   onChange: () => void;
+  visible: boolean;
 }) {
   const pinned = widgets.filter((w) => w.pinned || w.status === "active");
   return (
     <Section id="widgets" label="Widgets" count={widgets.length} defaultOpen={false}>
       {widgets.length === 0 && <div className="empty">none — agents publish these</div>}
       {pinned.map((w) => (
-        <Widget key={w.id} widget={w} api={api} />
+        <Widget key={w.id} widget={w} api={api} visible={visible} />
       ))}
       {widgets
         .filter((w) => w.status === "draft")
         .map((w) => (
-          <WidgetWithGate key={w.id} widget={w} api={api} onChange={onChange} />
+          <WidgetWithGate key={w.id} widget={w} api={api} onChange={onChange} visible={visible} />
         ))}
     </Section>
   );
@@ -1727,11 +1752,13 @@ function ThreadPanel({
   api,
   me,
   onClose,
+  eventListener,
 }: {
   rootId: string;
   api: Api;
   me: { id: string; role?: string };
   onClose: () => void;
+  eventListener: React.MutableRefObject<((event: Event) => void) | null>;
 }) {
   const [root, setRoot] = useState<Event | null>(null);
   const [replies, setReplies] = useState<Event[]>([]);
@@ -1741,39 +1768,51 @@ function ThreadPanel({
   // so the thread keeps its shape, but they are not replies.
   const live = replies.filter((r) => r.kind !== "message_deleted").length;
 
-  const load = useCallback(async () => {
-    const r = await api.thread(rootId);
-    setRoot(r.root);
-    setReplies(r.replies);
-  }, [api, rootId]);
-
   useEffect(() => {
-    void load();
-  }, [load]);
+    let live = true;
+    let refreshing = false;
+    let pending = false;
+    let currentRoot = rootId;
+    const seen = new Set<string>();
 
-  // Replies arrive over the same WebSocket as everything else.
-  useEffect(() => {
-    const ws = api.stream(
-      (raw) => {
-        const m = raw as { type?: string; event?: Event };
-        if (m.type === "event" && m.event && (m.event.reply_to === rootId || m.event.id === rootId)) {
-          void load();
-        }
-      },
-      () => {},
-      () => {},
-    );
-    return () => ws.close();
-  }, [api, rootId, load]);
+    const refresh = async () => {
+      pending = true;
+      if (refreshing) return;
+      refreshing = true;
+      while (live && pending) {
+        pending = false;
+        const thread = await api.thread(rootId).catch(() => null);
+        if (!thread || !live) continue;
+        currentRoot = thread.root.id;
+        setRoot(thread.root);
+        setReplies(thread.replies);
+      }
+      refreshing = false;
+    };
+
+    eventListener.current = (event) => {
+      const relevant =
+        event.reply_to === rootId || event.reply_to === currentRoot ||
+        event.id === rootId || event.root_id === rootId || event.revision_of === currentRoot;
+      if (!relevant || seen.has(event.id)) return;
+      seen.add(event.id);
+      void refresh();
+    };
+    void refresh();
+    return () => {
+      live = false;
+      eventListener.current = null;
+    };
+  }, [api, rootId, eventListener]);
 
   const send = async () => {
     const body = draft.trim();
     if (!body || busy) return;
     setBusy(true);
     try {
-      await api.postReply(rootId, body);
+      const { event } = await api.postReply(rootId, body);
       setDraft("");
-      await load();
+      eventListener.current?.(event);
     } finally {
       setBusy(false);
     }
