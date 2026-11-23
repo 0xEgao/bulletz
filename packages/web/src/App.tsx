@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Decision, Event, Note, Task, Channel } from "@bulletz/shared";
+import { githubLink, isGitHubMessage } from "@bulletz/shared/github";
 import { Api, ApiError, apiServer, auth, bootstrap, type Constraint, type Presence, type Project } from "./api.ts";
 import { ensureAgentCredential } from "./agentCredential.ts";
 import { ProjectSetup, hasSkippedProject } from "./ProjectSetup.tsx";
@@ -708,6 +709,8 @@ function Workspace({
   showOnboarding.current = !onboardDismissed;
   const activeRef = useRef<string | null>(null);
   activeRef.current = activeId;
+  const visibleChannel = useRef<string | null>(null);
+  visibleChannel.current = surface === "chat" ? activeId : null;
 
   const refreshData = useMemo(
     () => ({
@@ -782,6 +785,13 @@ function Workspace({
               .map((t) => (t.id === ev.channel_id ? { ...t, last_event_at: ev.created_at } : t))
               .sort((a, b) => b.last_event_at.localeCompare(a.last_event_at)),
           );
+          const channelId = ev.channel_id;
+          if (channelId && channelId !== visibleChannel.current && isGitHubMessage(ev)) {
+            setUnreadByChannel((prev) => ({
+              ...prev,
+              [channelId]: { unread: (prev[channelId]?.unread ?? 0) + 1, mentions: prev[channelId]?.mentions ?? 0 },
+            }));
+          }
         } else if (type === "channel") {
           const th = m["channel"] as unknown as Channel;
           setChannels((prev) => (prev.some((p) => p.id === th.id) ? prev : [th, ...prev]));
@@ -792,14 +802,14 @@ function Workspace({
           const n = m["notification"] as unknown as import("@bulletz/shared").Notification;
           setLiveNotifs((prev) => (prev.some((p) => p.id === n.id) ? prev : [n, ...prev]));
           // An OS notification only when the window is not already showing it.
-          if (document.hidden || n.channel_id !== activeRef.current) {
+          if (document.hidden || n.channel_id !== visibleChannel.current) {
             void bridge()?.notify?.show({
               title: n.title,
               body: n.body ?? "",
               ...(n.channel_id ? { channelId: n.channel_id } : {}),
             });
           }
-          if (n.channel_id && n.channel_id !== activeRef.current) {
+          if (n.kind !== "github" && n.channel_id && n.channel_id !== visibleChannel.current) {
             setUnreadByChannel((prev) => {
               const cur = prev[n.channel_id!] ?? { unread: 0, mentions: 0 };
               return {
@@ -864,9 +874,9 @@ function Workspace({
 
   /** Opening a channel is what marks it caught up. */
   useEffect(() => {
-    if (!activeId || events.length === 0) return;
+    if (surface !== "chat" || !activeId || events.length === 0) return;
     const head = events[events.length - 1];
-    if (!head) return;
+    if (!head || head.channel_id !== activeId) return;
     setUnreadByChannel((prev) => {
       if (!prev[activeId]) return prev;
       const next = { ...prev };
@@ -874,7 +884,7 @@ function Workspace({
       return next;
     });
     void api.readChannel(activeId, head.seq).catch(() => {});
-  }, [api, activeId, events]);
+  }, [api, activeId, events, surface]);
 
   /** Is there a newer build? Only meaningful in the desktop app — the web UI
    *  is whatever the server is serving. */
@@ -1093,6 +1103,16 @@ function Workspace({
             notes={notes}
             widgets={widgets}
             me={me}
+            channels={channels}
+            onChannelCreated={(channel) => {
+              setChannels((prev) => prev.some((item) => item.id === channel.id) ? prev : [channel, ...prev]);
+            }}
+            onOpenChannel={(channelId) => {
+              setSurface("chat");
+              localStorage.setItem("bulletz.surface", "chat");
+              setActiveId(channelId);
+              setOpenThread(null);
+            }}
             onTasksChange={refreshData.task}
             onNotesChange={refreshData.notes}
             onWidgetsChange={refreshData.widget}
@@ -1940,6 +1960,9 @@ function Message({
   const [asking, setAsking] = useState(false);
   const [instruction, setInstruction] = useState("");
   const isAgent = e.actor_kind === "agent";
+  const isGitHub = isGitHubMessage(e);
+  const githubUrl = isGitHub ? githubLink(e.refs.urls?.[0]) : null;
+  const sender = isGitHub ? "GitHub" : e.actor_handle;
 
   // The confirm state reverts on its own: an armed Delete button left hanging
   // in a channel is a trap the next time someone reaches for the row.
@@ -1983,11 +2006,12 @@ function Message({
 
   return (
     <div className="msg">
-      <div className={`avatar${isAgent ? " agent" : ""}`}>{initials(e.actor_handle ?? "?")}</div>
+      <div className={`avatar${isAgent ? " agent" : ""}`}>{isGitHub ? "GH" : initials(sender ?? "?")}</div>
       <div className="msg-main">
         <div className="msg-head">
-          <span className={`msg-who${isAgent ? " agent" : ""}`}>{e.actor_handle}</span>
+          <span className={`msg-who${isAgent ? " agent" : ""}`}>{sender}</span>
           {isAgent && <span className="badge">agent</span>}
+          {isGitHub && <span className="badge">bot</span>}
           <ChatTimestamp className="msg-time" value={e.created_at} />
           {e.edited && <span className="msg-edited" title="edited — earlier versions remain in the log">edited</span>}
           {!editing && (
@@ -2055,7 +2079,12 @@ function Message({
           </div>
         ) : (
           <div className="msg-body">
-            <Markdown text={e.body ?? ""} />
+            {isGitHub ? (
+              <>
+                <span>{e.body}</span>
+                {githubUrl && <a className="github-message-link" href={githubUrl} target="_blank" rel="noreferrer">View on GitHub</a>}
+              </>
+            ) : <Markdown text={e.body ?? ""} />}
           </div>
         )}
 

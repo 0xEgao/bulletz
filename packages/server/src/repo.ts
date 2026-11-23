@@ -1,5 +1,5 @@
 import type { Decision, Event, Note, SearchHit, Task, Channel } from "@bulletz/shared";
-import { maybeOne, one, q } from "./db.js";
+import { maybeOne, one, q, type QueryClient } from "./db.js";
 
 const EVENT_COLS = `
   e.id, e.workspace_id, e.channel_id, e.actor_id, a.handle as actor_handle,
@@ -92,11 +92,13 @@ export async function createChannel(
   workspaceId: string,
   title: string,
   createdBy: string,
+  client?: QueryClient,
 ): Promise<Channel> {
   return one<Channel>(
     `insert into channels (workspace_id, title, created_by) values ($1, $2, $3)
       returning id, workspace_id, title, status, created_at, last_event_at`,
     [workspaceId, title, createdBy],
+    client,
   );
 }
 
@@ -121,7 +123,7 @@ export async function appendEvent(input: {
   labels?: string[];
   revisionOf?: string | null;
   replyTo?: string | null;
-}): Promise<Event> {
+}, client?: QueryClient): Promise<Event> {
   const row = await one<Event>(
     `with recursive candidates as (
        insert into events (workspace_id, channel_id, actor_id, kind, body, payload, refs, labels, revision_of, reply_to)
@@ -143,9 +145,11 @@ export async function appendEvent(input: {
       input.revisionOf ?? null,
       input.replyTo ?? null,
     ],
+    client,
   );
   if (input.channelId) {
-    await q(`update channels set last_event_at = now() where id = $1`, [input.channelId]);
+    await q(`update channels set last_event_at = greatest(last_event_at, $2) where id = $1`,
+      [input.channelId, row.created_at], client);
   }
   return row;
 }

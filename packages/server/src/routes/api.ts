@@ -555,6 +555,7 @@ export async function apiRoutes(app: FastifyInstance) {
         task: z.boolean().optional(),
         agent: z.boolean().optional(),
         system: z.boolean().optional(),
+        github: z.boolean().optional(),
         desktop: z.boolean().optional(),
         sound: z.boolean().optional(),
       })

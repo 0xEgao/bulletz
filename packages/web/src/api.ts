@@ -1,4 +1,5 @@
 import type { Decision, Event, Note, Task, Channel, Notification, ChannelUnread } from "@bulletz/shared";
+import type { GitHubConnection, GitHubRoute } from "@bulletz/shared";
 
 import { resolveServer } from "./server.ts";
 
@@ -180,6 +181,16 @@ export class Api {
   }
 
   logout = () => this.call("POST", "/auth/logout", {});
+
+  githubConnection = (signal?: AbortSignal) =>
+    this.call<{ connection: GitHubConnection | null }>("GET", "/integrations/github", undefined, signal);
+  connectGitHub = (organization: string) =>
+    this.call<{ connection: GitHubConnection; channel: Channel }>("POST", "/integrations/github", { organization });
+  saveGitHubRoutes = (routes: GitHubRoute[]) =>
+    this.call<{ connection: GitHubConnection }>("PUT", "/integrations/github/routes", { routes });
+  rotateGitHubSecret = () =>
+    this.call<{ connection: GitHubConnection }>("POST", "/integrations/github/rotate-secret", {});
+  disconnectGitHub = () => this.call("DELETE", "/integrations/github");
 
   /* ----------------------------- notifications ---------------------------- */
   notifications = (unread = false) =>
