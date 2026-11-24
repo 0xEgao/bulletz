@@ -7,19 +7,23 @@ pg.types.setTypeParser(pg.types.builtins.TIMESTAMPTZ, (v) => new Date(v).toISOSt
 
 export const pool = new pg.Pool({ connectionString: env.databaseUrl, max: 10 });
 
+export type QueryClient = Pick<pg.PoolClient, "query">;
+
 export async function q<T extends pg.QueryResultRow = pg.QueryResultRow>(
   text: string,
   params: unknown[] = [],
+  client: QueryClient = pool,
 ): Promise<T[]> {
-  const res = await pool.query<T>(text, params as never[]);
+  const res = await client.query<T>(text, params as never[]);
   return res.rows;
 }
 
 export async function one<T extends pg.QueryResultRow = pg.QueryResultRow>(
   text: string,
   params: unknown[] = [],
+  client?: QueryClient,
 ): Promise<T> {
-  const rows = await q<T>(text, params);
+  const rows = await q<T>(text, params, client);
   const row = rows[0];
   if (!row) throw new Error("expected exactly one row, got none");
   return row;
@@ -28,8 +32,9 @@ export async function one<T extends pg.QueryResultRow = pg.QueryResultRow>(
 export async function maybeOne<T extends pg.QueryResultRow = pg.QueryResultRow>(
   text: string,
   params: unknown[] = [],
+  client?: QueryClient,
 ): Promise<T | null> {
-  const rows = await q<T>(text, params);
+  const rows = await q<T>(text, params, client);
   return rows[0] ?? null;
 }
 

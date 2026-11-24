@@ -448,6 +448,7 @@ button { font: inherit; cursor: pointer; }
   font-size: 13px; line-height: 1; padding: 3px 7px 4px; margin-left: 2px;
 }
 .tab-add:hover { color: var(--fg); }
+.tab-add-agent { font-size: 10.5px; white-space: nowrap; }
 
 /* -------------------------------- widgets ------------------------------- */
 
@@ -624,6 +625,34 @@ button { font: inherit; cursor: pointer; }
 .app-note { font-family: var(--mono); font-size: 10px; color: var(--fg-faint); }
 .app-head .widget-activate { margin-left: auto; }
 .app-full { padding: 16px; }
+
+.github-app { width: 100%; max-width: 780px; }
+.github-app-head, .github-actions, .github-copy { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.github-app-head { justify-content: space-between; margin-bottom: 16px; }
+.github-app h2, .github-app h3 { margin: 0 0 5px; font-size: 14px; }
+.github-app h2 { font-size: 18px; }
+.github-app p { margin: 0 0 10px; line-height: 1.5; }
+.github-app-head p { margin: 0; }
+.github-connected { color: var(--status-good); }
+.github-error { color: var(--danger); }
+.github-card { margin-bottom: 12px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius); }
+.github-copy { align-items: flex-end; margin-bottom: 10px; }
+.github-copy .field, .github-actions .field { flex: 1; min-width: 150px; max-width: none; margin: 0; }
+.github-copy input { font-family: var(--mono); }
+.github-route { margin-bottom: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.github-route .github-actions { align-items: flex-end; margin-bottom: 12px; }
+.github-route select {
+  background: var(--bg-input); border: 1px solid var(--line); border-radius: 5px;
+  padding: 6px 9px; color: var(--fg); font: inherit;
+}
+.github-events {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+  gap: 8px; margin: 0; padding: 0; border: 0;
+}
+.github-events legend { padding: 0 0 6px; font-size: 11px; color: var(--fg-dim); }
+.github-events label { display: flex; gap: 6px; align-items: center; font-size: 11px; }
+.github-events input { margin: 0; }
+.github-message-link { display: block; width: fit-content; margin-top: 3px; font-size: 11px; }
 
 /* ----------------------------- embedded site ----------------------------- */
 
@@ -1527,7 +1556,6 @@ button { font: inherit; cursor: pointer; }
 .server-row input:focus { outline: none; border-color: var(--accent-line); }
 .server-row .send { flex: 0 0 auto; width: auto; padding: 6px 14px; }
 .server-err { font-size: 10.5px; color: var(--danger); line-height: 1.45; }
-.server-ok { font-size: 10.5px; color: var(--status-good); line-height: 1.45; }
 .server-hint { font-size: 10px; color: var(--fg-faint); line-height: 1.5; }
 .server-hint code {
   font-family: var(--mono); background: var(--bg-input);

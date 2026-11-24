@@ -153,18 +153,17 @@ function projectPicked(): boolean {
  * well as login (-l): plenty of people set PATH in .zshrc, which a
  * non-interactive shell never reads.
  */
-function adoptShellPath() {
+async function adoptShellPath() {
   // Launched from a terminal, the PATH is already the real one.
   if (!app.isPackaged && process.env["TERM"]) return;
   const shell = process.env["SHELL"];
   if (!shell || process.platform === "win32") return;
   try {
-    const out = execFileSync(shell, ["-ilc", 'printf "%s" "$PATH"'], {
+    const { stdout } = await exec(shell, ["-ilc", 'printf "%s" "$PATH"'], {
       encoding: "utf8",
       timeout: 5000,
-      // A dotfile that prints a banner would otherwise end up in the PATH.
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    });
+    const out = stdout.trim();
     if (!out.includes("/")) return;
     const merged = [...new Set([...out.split(":"), ...(process.env["PATH"] ?? "").split(":")])]
       .filter(Boolean)
@@ -197,7 +196,7 @@ const MCP_BUNDLE = join(ASSETS, "mcp.mjs");
 /** Unused at runtime — nativeImage cannot read .icns. It exists for the
  *  packaging step, which embeds it in the macOS bundle's Info.plist. */
 export const ICON_ICNS = join(ASSETS, "icon.icns");
-const DEV_URL = process.env.BULLETZ_DEV_URL;
+const DEV_URL = app.isPackaged ? undefined : process.env.BULLETZ_DEV_URL;
 
 /** The built web UI. Packaged, electron-builder copies packages/web/dist into
  *  Contents/Resources/web; from source it is still in the repo. This
@@ -683,7 +682,7 @@ function createWindow() {
     height: 900,
     minWidth: 900,
     minHeight: 560,
-    backgroundColor: "#0d1017",
+    backgroundColor: "#0b0b0c",
     titleBarStyle: "hiddenInset",
     icon: ICON_PNG,
     // The lights are 12px tall in a 38px title bar, so (38-12)/2 = 13 centres
@@ -707,8 +706,14 @@ function createWindow() {
     return { action: "deny" };
   });
 
-  if (DEV_URL) void win.loadURL(DEV_URL);
-  else void win.loadFile(RENDERER_HTML);
+  const renderer = DEV_URL
+    ? win.loadURL(DEV_URL).catch(() => win.loadFile(RENDERER_HTML))
+    : win.loadFile(RENDERER_HTML);
+  void renderer.catch((error: Error) => {
+    if (win.isDestroyed()) return;
+    dialog.showErrorBox("Bulletz could not open the desktop UI", error.message);
+    win.close();
+  });
 
   // macOS hides the traffic lights in fullscreen, so the space the title bar
   // reserves for them becomes dead space. Tell the renderer which it is.
@@ -730,7 +735,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  adoptShellPath();
+  const shellReady = adoptShellPath();
   migrateUserData();
   applyAppIdentity();
 
@@ -760,10 +765,11 @@ app.whenReady().then(() => {
 
   ipcMain.handle(
     "term:spawn",
-    (
+    async (
       _e,
       { id, cols, rows, kind }: { id: string; cols: number; rows: number; kind?: "shell" | "agent" },
     ) => {
+    await shellReady;
     // Nothing is started in a folder nobody chose. The pane says so and offers
     // the picker, which is a far better first run than silently taking $HOME.
     if (!projectPicked()) {
@@ -824,6 +830,7 @@ app.whenReady().then(() => {
         shell: "",
         replay: "",
         reattached: false,
+        needsAgent: true,
         error:
           "No coding agent found. Set one in Settings — any CLI agent works; " +
           `we looked for ${AGENT_PRESETS.map((p) => p.cmd.command).join(", ")}.`,
@@ -1135,7 +1142,8 @@ app.whenReady().then(() => {
     };
   });
 
-  ipcMain.handle("agent:command", (_e, patch: unknown) => {
+  ipcMain.handle("agent:command", async (_e, patch: unknown) => {
+    await shellReady;
     if (patch !== undefined) {
       const p = patch as Partial<AgentCommand> | null;
       storeAgentCommand(

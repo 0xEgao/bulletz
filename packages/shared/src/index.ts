@@ -240,7 +240,7 @@ export type PresenceInput = z.infer<typeof PresenceInput>;
 
 export const Notification = z.object({
   id: z.string().uuid(),
-  kind: z.enum(["mention", "reply", "task", "agent", "system"]),
+  kind: z.enum(["mention", "reply", "task", "agent", "system", "github"]),
   title: z.string(),
   body: z.string().nullable(),
   channel_id: z.string().uuid().nullable(),
@@ -250,6 +250,8 @@ export const Notification = z.object({
   created_at: z.string(),
 });
 export type Notification = z.infer<typeof Notification>;
+
+export * from "./github.js";
 
 export type ChannelUnread = {
   channel_id: string;

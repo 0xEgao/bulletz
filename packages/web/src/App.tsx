@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Decision, Event, Note, Task, Channel } from "@bulletz/shared";
-import { Api, auth, bootstrap, type Constraint, type Presence, type Project } from "./api.ts";
+import { githubLink, isGitHubMessage } from "@bulletz/shared/github";
+import { Api, ApiError, apiServer, auth, bootstrap, type Constraint, type Presence, type Project } from "./api.ts";
 import { ensureAgentCredential } from "./agentCredential.ts";
 import { ProjectSetup, hasSkippedProject } from "./ProjectSetup.tsx";
 import { parseInvite, inviteFromLocation, clearInviteFromLocation, holdInvite } from "./invites.ts";
 import { Markdown } from "./Markdown.tsx";
 import { Settings } from "./Settings.tsx";
-import { Connect, ServerPicker, Unreachable } from "./ServerPicker.tsx";
+import { Connect, ServerPicker, Startup, Unreachable } from "./ServerPicker.tsx";
 import { NotificationBell, type LocalNotification } from "./Notifications.tsx";
 import { checkForUpdate, dismissUpdate } from "./updates.ts";
-import { clearServer, resolveServer, serverSource, setServer } from "./server.ts";
+import { clearServer, probeServer, resolveServer, setServer, type Probe } from "./server.ts";
 import {
   activeAccount,
   beginAddWorkspace,
@@ -81,7 +82,7 @@ function tombstone(e: Event): { who: string | undefined; note: string } {
 }
 
 const AGENT_UNAVAILABLE = {
-  "no-session": "_No agent session running. Open the Agent tab below._",
+  "no-session": "_No agent session running. Open or start an Agent tab below._",
   // Naming the fix matters: the session is right there and looks alive, so
   // "no agent" would read as a lie.
   stale: "_The agent session below was started against a different workspace. Restart it from the Agent tab and ask again._",
@@ -121,53 +122,44 @@ export function App() {
   const [needsProject, setNeedsProject] = useState(false);
   const [authErr, setAuthErr] = useState("");
   const [probe, setProbe] = useState(0);
-  const [needsSetup, setNeedsSetup] = useState<boolean | null>(null);
-  const [unreachable, setUnreachable] = useState("");
+  const [connection, setConnection] = useState<Probe | null>(null);
+  const [sessionError, setSessionError] = useState("");
 
-  // Ask the server whether anyone has set this up yet, before offering a
-  // sign-in nobody can satisfy. A failure here is NOT "no setup needed": it
-  // means we never reached the server, and pretending otherwise renders a form
-  // that can only fail with nothing on screen explaining why.
   useEffect(() => {
-    if (serverSource() === "none") return;
-    void bootstrap
-      .status()
-      .then((r) => {
-        setUnreachable("");
-        setNeedsSetup(r.needsSetup);
-      })
-      .catch((e: Error) =>
-        // "Failed to fetch" is what the browser says and tells nobody
-        // anything; the useful version names the thing to check.
-        setUnreachable(
-          /failed to fetch|networkerror|load failed/i.test(e.message)
-            ? "No answer at that address. Check it is running and reachable from here."
-            : e.message || "No answer from the server.",
-        ),
-      );
+    if (!apiServer) return;
+    const controller = new AbortController();
+    void probeServer(apiServer, controller.signal).then((result) => {
+      if (!controller.signal.aborted) setConnection(result);
+    });
+    return () => controller.abort();
   }, [probe]);
 
   const api = useMemo(() => (token ? new Api(token) : null), [token]);
+  const ready = connection?.ok === true && !connection.needsSetup;
 
   useEffect(() => {
-    if (!api) return;
-    let live = true;
+    if (!api || !ready) return;
+    const controller = new AbortController();
+    const { signal } = controller;
     void (async () => {
       try {
-        const { actor } = await api.me();
-        if (!live) return;
-        setMe(actor);
+        const { actor } = await api.me(AbortSignal.any([signal, AbortSignal.timeout(6000)]));
+        if (signal.aborted) return;
+        if (!actor?.id || !actor.workspace_id) throw new Error("Invalid session response.");
 
-        // Record (or refresh) the workspace this credential belongs to. This
-        // is also the upgrade path: a pre-accounts token becomes the first
-        // account here, because only now do we know whose it is and where.
-        const project = await api.project().catch(() => null);
-        if (!live) return;
+        const b = bridge();
+        // The terminal must see the selected workspace before it first renders.
+        await b?.server?.set(api.baseUrl, actor.workspace_id);
+        if (signal.aborted) return;
+        const info = await b?.project?.get();
+        if (signal.aborted) return;
+
+        const previous = activeAccount();
         const account = upsertAccount({
-          serverUrl: resolveServer(),
+          serverUrl: api.baseUrl,
           token: api.authToken,
           workspaceId: actor.workspace_id,
-          workspaceName: project?.name ?? "Workspace",
+          workspaceName: previous?.workspaceId === actor.workspace_id ? previous.workspaceName : "Workspace",
           handle: actor.handle,
           actorId: actor.id,
           role: actor.role,
@@ -175,75 +167,83 @@ export function App() {
         clearLegacyToken();
         endAddWorkspace();
         setAddingWorkspace(false);
-        // Main runs the agent and the MCP bridge; they must follow the window.
-        // Awaited, because the agent credential below is stored per server and
-        // would otherwise be filed against whichever workspace was last open.
-        await bridge()?.server?.set(account.serverUrl, actor.workspace_id);
-        if (!live) return;
-        // And the agent in the dock gets an identity without anyone having to
-        // find the onboarding step for it.
+        setNeedsProject(Boolean(
+          info && !info.chosen && b?.project?.pick && b.project.bind && !hasSkippedProject(account.serverUrl),
+        ));
+        setMe(actor);
         void ensureAgentCredential(api);
 
-        // Ask where this workspace's code lives, once, now — while the person
-        // is still setting things up and knows the answer. Skippable; the
-        // terminal's own gate catches anyone who skips.
-        const b = bridge();
-        if (b?.project?.pick && b.project.bind) {
-          const info = await b.project.get();
-          if (!live) return;
-          if (!info.chosen && !hasSkippedProject(account.serverUrl)) setNeedsProject(true);
-        }
+        // The workspace switcher can pick up the latest name after the app opens.
+        void api.project(AbortSignal.any([signal, AbortSignal.timeout(6000)])).then((project) => {
+          const current = activeAccount();
+          if (!signal.aborted && current?.id === account.id && current.workspaceName !== project.name) {
+            upsertAccount({ ...current, workspaceName: project.name });
+          }
+        }).catch(() => {});
       } catch (e) {
-        if (!live) return;
-        setAuthErr((e as Error).message);
-        setMe(null);
-        clearLegacyToken();
-        setToken("");
+        if (signal.aborted) return;
+        if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+          setAuthErr(e.message);
+          clearLegacyToken();
+          setToken("");
+        } else {
+          setSessionError("Could not verify your session. Try again.");
+        }
       }
     })();
-    return () => {
-      live = false;
-    };
-  }, [api]);
+    return () => controller.abort();
+  }, [api, ready]);
 
-  // A downloaded app that has never been told where any workspace lives.
-  if (serverSource() === "none" && !addingWorkspace) {
-    return <Connect onConnected={() => location.reload()} />;
+  const retry = () => {
+    setConnection(null);
+    setSessionError("");
+    setProbe((n) => n + 1);
+  };
+  const cancelAdd = addingWorkspace ? () => {
+    endAddWorkspace();
+    clearServer();
+    location.reload();
+  } : undefined;
+
+  if (!apiServer) {
+    return <Connect onConnected={() => location.reload()} onCancel={cancelAdd} />;
   }
-  if (unreachable) {
-    return <Unreachable error={unreachable} onRetry={() => setProbe((n) => n + 1)} />;
+  if (sessionError || connection?.ok === false) {
+    return (
+      <Unreachable
+        server={apiServer}
+        error={connection?.ok === false ? connection.error : sessionError}
+        onRetry={retry}
+        onCancel={cancelAdd}
+      />
+    );
   }
-  if (needsSetup === null) return <div className="auth" />;
-  if (needsSetup) {
+  if (!connection) return <Startup>Connecting to the server…</Startup>;
+  if (connection.needsSetup) {
     return (
       <Setup
         onDone={(t) => {
-          setNeedsSetup(false);
+          setConnection({ ...connection, needsSetup: false });
           setToken(t);
         }}
       />
     );
   }
 
+  if (api && !me) return <Startup>Checking your session…</Startup>;
   if (!api || !me || addingWorkspace) {
     return (
       <Auth
         error={authErr}
-        // Adding a second workspace happens over a session that is still
-        // valid, so there has to be a way back to it.
-        onCancel={
-          addingWorkspace
-            ? () => {
-                endAddWorkspace();
-                clearServer();
-                // The picker may have pointed this page at another server;
-                // only a reload puts the API base back where it belongs.
-                location.reload();
-              }
-            : undefined
-        }
+        onCancel={cancelAdd}
         onSubmit={(t) => {
           setAuthErr("");
+          if (t === token) {
+            endAddWorkspace();
+            setAddingWorkspace(false);
+            return;
+          }
+          setMe(null);
           setToken(t);
         }}
       />
@@ -563,12 +563,12 @@ function Auth({
 
         <button className="send" type="submit" disabled={busy}>
           {busy
-            ? "…"
+            ? "Signing in…"
             : mode === "invite"
               ? "Create account"
               : mode === "reset"
                 ? "Set password"
-                : "Connect"}
+                : "Sign in"}
         </button>
 
         {mode === "login" && (
@@ -709,6 +709,8 @@ function Workspace({
   showOnboarding.current = !onboardDismissed;
   const activeRef = useRef<string | null>(null);
   activeRef.current = activeId;
+  const visibleChannel = useRef<string | null>(null);
+  visibleChannel.current = surface === "chat" ? activeId : null;
 
   const refreshData = useMemo(
     () => ({
@@ -783,6 +785,13 @@ function Workspace({
               .map((t) => (t.id === ev.channel_id ? { ...t, last_event_at: ev.created_at } : t))
               .sort((a, b) => b.last_event_at.localeCompare(a.last_event_at)),
           );
+          const channelId = ev.channel_id;
+          if (channelId && channelId !== visibleChannel.current && isGitHubMessage(ev)) {
+            setUnreadByChannel((prev) => ({
+              ...prev,
+              [channelId]: { unread: (prev[channelId]?.unread ?? 0) + 1, mentions: prev[channelId]?.mentions ?? 0 },
+            }));
+          }
         } else if (type === "channel") {
           const th = m["channel"] as unknown as Channel;
           setChannels((prev) => (prev.some((p) => p.id === th.id) ? prev : [th, ...prev]));
@@ -793,14 +802,14 @@ function Workspace({
           const n = m["notification"] as unknown as import("@bulletz/shared").Notification;
           setLiveNotifs((prev) => (prev.some((p) => p.id === n.id) ? prev : [n, ...prev]));
           // An OS notification only when the window is not already showing it.
-          if (document.hidden || n.channel_id !== activeRef.current) {
+          if (document.hidden || n.channel_id !== visibleChannel.current) {
             void bridge()?.notify?.show({
               title: n.title,
               body: n.body ?? "",
               ...(n.channel_id ? { channelId: n.channel_id } : {}),
             });
           }
-          if (n.channel_id && n.channel_id !== activeRef.current) {
+          if (n.kind !== "github" && n.channel_id && n.channel_id !== visibleChannel.current) {
             setUnreadByChannel((prev) => {
               const cur = prev[n.channel_id!] ?? { unread: 0, mentions: 0 };
               return {
@@ -865,9 +874,9 @@ function Workspace({
 
   /** Opening a channel is what marks it caught up. */
   useEffect(() => {
-    if (!activeId || events.length === 0) return;
+    if (surface !== "chat" || !activeId || events.length === 0) return;
     const head = events[events.length - 1];
-    if (!head) return;
+    if (!head || head.channel_id !== activeId) return;
     setUnreadByChannel((prev) => {
       if (!prev[activeId]) return prev;
       const next = { ...prev };
@@ -875,7 +884,7 @@ function Workspace({
       return next;
     });
     void api.readChannel(activeId, head.seq).catch(() => {});
-  }, [api, activeId, events]);
+  }, [api, activeId, events, surface]);
 
   /** Is there a newer build? Only meaningful in the desktop app — the web UI
    *  is whatever the server is serving. */
@@ -1094,6 +1103,16 @@ function Workspace({
             notes={notes}
             widgets={widgets}
             me={me}
+            channels={channels}
+            onChannelCreated={(channel) => {
+              setChannels((prev) => prev.some((item) => item.id === channel.id) ? prev : [channel, ...prev]);
+            }}
+            onOpenChannel={(channelId) => {
+              setSurface("chat");
+              localStorage.setItem("bulletz.surface", "chat");
+              setActiveId(channelId);
+              setOpenThread(null);
+            }}
             onTasksChange={refreshData.task}
             onNotesChange={refreshData.notes}
             onWidgetsChange={refreshData.widget}
@@ -1290,6 +1309,8 @@ function Workspace({
  *  ground, and none of this is. Transcripts never leave the machine and the
  *  list is scoped to the person who ran them. */
 
+type DockSession = { id: string; label: string; kind?: "shell" | "agent" };
+
 function TerminalDock({
   onAgentReady,
 }: {
@@ -1317,10 +1338,10 @@ function TerminalDock({
    * The first keeps the id "agent" so an existing session reattaches rather
    * than being orphaned by this change.
    */
-  const [agents, setAgents] = useState<{ id: string; label: string }[]>(() => {
+  const [sessions, setSessions] = useState<DockSession[]>(() => {
     try {
       const raw = JSON.parse(localStorage.getItem("bulletz.dockAgents") ?? "null") as
-        | { id: string; label: string }[]
+        | DockSession[]
         | null;
       if (Array.isArray(raw) && raw.length) return raw;
     } catch {
@@ -1336,31 +1357,31 @@ function TerminalDock({
   useEffect(() => localStorage.setItem("bulletz.termH", String(height)), [height]);
   useEffect(() => localStorage.setItem("bulletz.termOpen", open ? "1" : "0"), [open]);
   useEffect(() => localStorage.setItem("bulletz.dockTab", tab), [tab]);
-  useEffect(() => localStorage.setItem("bulletz.dockAgents", JSON.stringify(agents)), [agents]);
+  useEffect(() => localStorage.setItem("bulletz.dockAgents", JSON.stringify(sessions)), [sessions]);
 
   // A tab pointing at a session that is no longer here — closed in another
   // window, or removed below — must not leave the dock showing nothing.
   useEffect(() => {
-    if (tab !== "terminal" && !agents.some((a) => a.id === tab)) setTab("terminal");
-  }, [agents, tab]);
+    if (tab !== "terminal" && !sessions.some((session) => session.id === tab)) setTab("terminal");
+  }, [sessions, tab]);
 
-  const addAgent = () => {
-    // Ids have to be stable across reloads, because that is what reattaches a
-    // session to its pty. Highest-numbered rather than count-based, so closing
-    // the middle one does not hand its id to the next.
-    const n =
-      agents.reduce((max, a) => Math.max(max, Number(/\d+$/.exec(a.id)?.[0] ?? 1)), 1) + 1;
-    const next = { id: `agent-${n}`, label: `Agent ${n}` };
-    setAgents((prev) => [...prev, next]);
+  const addTab = (kind: "shell" | "agent") => {
+    const n = sessions.reduce(
+      (max, session) => Math.max(max, Number(/\d+$/.exec(session.label)?.[0] ?? 1)),
+      1,
+    ) + 1;
+    const next = { id: crypto.randomUUID(), label: `${kind === "shell" ? "Terminal" : "Agent"} ${n}`, kind };
+    setSessions((prev) => [...prev, next]);
     setTab(next.id);
+    setOpen(true);
   };
 
-  const closeAgent = (id: string) => {
+  const closeTab = (id: string) => {
     // Closing a tab ends the session. A pane going away does not — that is
     // what keeps a job alive across a reload — so this has to be explicit.
     void bridge()?.term?.kill?.(id);
-    setAgents((prev) => {
-      const rest = prev.filter((a) => a.id !== id);
+    setSessions((prev) => {
+      const rest = prev.filter((session) => session.id !== id);
       if (tab === id) setTab(rest[0]?.id ?? "terminal");
       // Never leave the row with no agent at all: the empty state would be a
       // dock that cannot do the thing it is for.
@@ -1401,18 +1422,18 @@ function TerminalDock({
             >
               Terminal
             </button>
-            {agents.map((a) => (
-              <span key={a.id} className={`tab-wrap${tab === a.id ? " active" : ""}`}>
-                <button className={`tab${tab === a.id ? " active" : ""}`} onClick={() => setTab(a.id)}>
-                  {a.label}
+            {sessions.map((session) => (
+              <span key={session.id} className={`tab-wrap${tab === session.id ? " active" : ""}`}>
+                <button className={`tab${tab === session.id ? " active" : ""}`} onClick={() => setTab(session.id)}>
+                  {session.label}
                 </button>
-                {agents.length > 1 && (
+                {(sessions.length > 1 || session.kind === "shell") && (
                   <button
                     className="tab-close"
-                    title={`End ${a.label}`}
+                    title={`End ${session.label}`}
                     onClick={(e) => {
                       e.stopPropagation();
-                      closeAgent(a.id);
+                      closeTab(session.id);
                     }}
                   >
                     ×
@@ -1420,9 +1441,16 @@ function TerminalDock({
                 )}
               </span>
             ))}
-            <button className="tab-add" title="Another agent session" onClick={addAgent}>
-              +
-            </button>
+            {desktop && (
+              <>
+                <button className="tab-add" title="New terminal tab" aria-label="New terminal tab" onClick={() => addTab("shell")}>
+                  +
+                </button>
+                <button className="tab-add tab-add-agent" onClick={() => addTab("agent")}>
+                  New agent
+                </button>
+              </>
+            )}
           </div>
           <button className="icon-btn" onClick={() => setOpen((v) => !v)} title={open ? "Hide" : "Show"}>
             {open ? "\u2013" : "+"}
@@ -1433,15 +1461,19 @@ function TerminalDock({
         <div className="dock-body" hidden={!open || tab !== "terminal"}>
           <TerminalPane id="main" />
         </div>
-        {/* Only the agent in view is mounted, which is what makes "send this
-            to the agent" unambiguous when several are running: the writer
-            belongs to whichever one you are looking at. Their ptys outlive
-            the panes, so switching tabs costs a replay and nothing else. */}
+        {/* Keep the PTY across tab switches. Only a configured agent tab
+            exposes a writer for "Send to agent". */}
         {open &&
-          agents.map(
-            (a) =>
-              tab === a.id && (
-                <TerminalPane key={a.id} id={a.id} kind="agent" onReady={onAgentReady} />
+          sessions.map(
+            (session) =>
+              tab === session.id && (
+                <TerminalPane
+                  key={session.id}
+                  id={session.id}
+                  kind={session.kind ?? "agent"}
+                  autoFocus
+                  onReady={session.kind === "shell" ? undefined : onAgentReady}
+                />
               ),
           )}
       </div>
@@ -1928,6 +1960,9 @@ function Message({
   const [asking, setAsking] = useState(false);
   const [instruction, setInstruction] = useState("");
   const isAgent = e.actor_kind === "agent";
+  const isGitHub = isGitHubMessage(e);
+  const githubUrl = isGitHub ? githubLink(e.refs.urls?.[0]) : null;
+  const sender = isGitHub ? "GitHub" : e.actor_handle;
 
   // The confirm state reverts on its own: an armed Delete button left hanging
   // in a channel is a trap the next time someone reaches for the row.
@@ -1971,11 +2006,12 @@ function Message({
 
   return (
     <div className="msg">
-      <div className={`avatar${isAgent ? " agent" : ""}`}>{initials(e.actor_handle ?? "?")}</div>
+      <div className={`avatar${isAgent ? " agent" : ""}`}>{isGitHub ? "GH" : initials(sender ?? "?")}</div>
       <div className="msg-main">
         <div className="msg-head">
-          <span className={`msg-who${isAgent ? " agent" : ""}`}>{e.actor_handle}</span>
+          <span className={`msg-who${isAgent ? " agent" : ""}`}>{sender}</span>
           {isAgent && <span className="badge">agent</span>}
+          {isGitHub && <span className="badge">bot</span>}
           <ChatTimestamp className="msg-time" value={e.created_at} />
           {e.edited && <span className="msg-edited" title="edited — earlier versions remain in the log">edited</span>}
           {!editing && (
@@ -2043,7 +2079,12 @@ function Message({
           </div>
         ) : (
           <div className="msg-body">
-            <Markdown text={e.body ?? ""} />
+            {isGitHub ? (
+              <>
+                <span>{e.body}</span>
+                {githubUrl && <a className="github-message-link" href={githubUrl} target="_blank" rel="noreferrer">View on GitHub</a>}
+              </>
+            ) : <Markdown text={e.body ?? ""} />}
           </div>
         )}
 

@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { maybeOne, one, q } from "../db.js";
 import { requireActor } from "../authHook.js";
-import { env } from "../env.js";
+import { publicOrigin } from "../env.js";
 import {
   can,
   createSession,
@@ -16,30 +16,6 @@ import {
 
 const INVITE_HOURS = 72;
 const RESET_HOURS = 2;
-
-/**
- * Where this server is reachable, for a link someone will paste elsewhere.
- *
- * A bare code makes the person inviting do the rest of the work: they have
- * to send the code AND tell you which server to put it into, and a code with
- * no server attached is useless on its own. A link carries both.
- *
- * PUBLIC_URL wins when set; otherwise the request's own Host is what the
- * sender just reached this server at, which is the best available guess at
- * what will work for the recipient. X-Forwarded-Proto matters because the
- * app sits behind a TLS terminator and sees plain http on the inside.
- */
-function publicOrigin(req: { headers: Record<string, unknown>; protocol?: string }): string {
-  if (env.publicUrl) return env.publicUrl;
-  const header = (k: string) => {
-    const v = req.headers[k];
-    return typeof v === "string" ? v.split(",")[0]!.trim() : "";
-  };
-  const host = header("x-forwarded-host") || header("host");
-  if (!host) return "";
-  const proto = header("x-forwarded-proto") || req.protocol || "https";
-  return `${proto}://${host}`;
-}
 
 /** The link form of an invite code. Empty when the host is unknowable, in
  *  which case the code alone is still returned and still works. */

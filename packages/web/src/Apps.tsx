@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import type { Note, Task } from "@bulletz/shared";
+import type { Channel, Note, Task } from "@bulletz/shared";
 import type { Api, Invite, Member } from "./api.ts";
+import { GitHubApp } from "./GitHubApp.tsx";
 import { Notes } from "./Notes.tsx";
 import { Widget, type WidgetRow } from "./Widget.tsx";
 
@@ -16,7 +17,7 @@ const COLUMNS = [
 ] as const;
 
 type AppId =
-  | { type: "builtin"; id: "board" | "notes" | "registry" | "members" }
+  | { type: "builtin"; id: "board" | "notes" | "registry" | "members" | "github" }
   | { type: "widget"; id: string };
 
 export function Apps({
@@ -25,6 +26,9 @@ export function Apps({
   notes,
   widgets,
   me,
+  channels,
+  onChannelCreated,
+  onOpenChannel,
   onTasksChange,
   onNotesChange,
   onWidgetsChange,
@@ -33,13 +37,17 @@ export function Apps({
   tasks: Task[];
   notes: Note[];
   widgets: WidgetRow[];
-  me: { id: string; handle: string; role: string };
+  me: { id: string; handle: string; role: string; kind: string };
+  channels: Channel[];
+  onChannelCreated: (channel: Channel) => void;
+  onOpenChannel: (channelId: string) => void;
   onTasksChange: () => void;
   onNotesChange: () => void;
   onWidgetsChange: () => void;
 }) {
   const [sel, setSel] = useState<AppId>({ type: "builtin", id: "board" });
   const active = widgets.filter((w) => w.status === "active");
+  const canManageGitHub = me.kind === "human" && (me.role === "owner" || me.role === "admin");
   const isSel = (a: AppId) => sel.type === a.type && sel.id === a.id;
 
   // Removing the app you are looking at — or a teammate removing it while you
@@ -99,6 +107,15 @@ export function Apps({
             </span>
           </button>
 
+          {canManageGitHub && (
+            <button
+              className={`app-item${isSel({ type: "builtin", id: "github" }) ? " active" : ""}`}
+              onClick={() => setSel({ type: "builtin", id: "github" })}
+            >
+              <span className="app-glyph" aria-hidden="true">GH</span>
+              <span>GitHub<span className="app-sub">Organization activity</span></span>
+            </button>
+          )}
           <div className="app-group-label">Published apps</div>
           {active.length === 0 && <div className="empty" style={{ padding: "4px 13px" }}>none active</div>}
           {active.map((w) => (
@@ -128,6 +145,9 @@ export function Apps({
           <Registry api={api} widgets={widgets} onChange={onWidgetsChange} />
         )}
         {sel.type === "builtin" && sel.id === "members" && <Members api={api} me={me} />}
+        {sel.type === "builtin" && sel.id === "github" && canManageGitHub && (
+          <GitHubApp api={api} channels={channels} onChannelCreated={onChannelCreated} onOpenChannel={onOpenChannel} />
+        )}
         {sel.type === "widget" &&
           (() => {
             const w = widgets.find((x) => x.id === sel.id);

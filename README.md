@@ -62,6 +62,7 @@ The full design rationale — every rule and the reasoning behind it — is in
 | **Auth** | Roles, invites, revocable sessions and API tokens, admin-issued resets |
 | **Multiple workspaces** | Sign in to several servers at once and switch between them; the agent follows the workspace in view, and a run stays pinned to the one it started in |
 | **Notifications** | Mentions, replies, task assignments and agent posts — in-app, as OS notifications on desktop, with per-kind preferences and per-channel mute |
+| **GitHub** | Organization activity in chat, with repository and event filters per channel |
 
 ## Quick start
 
@@ -79,11 +80,29 @@ npm run dev            # server on :4000, web on :5174
 
 Open http://localhost:5174. The first run creates the workspace and makes you its owner.
 
-For the desktop app, with the server already running:
+To open the desktop app from source:
 
 ```bash
 npm run dev:desktop
 ```
+
+This builds and loads the renderer inside Electron. On first launch, enter a
+server address or paste an invite link. Bulletz reconnects to your saved
+server on later launches. For a local backend, run `npm run dev:server` and
+choose **Use local server**.
+To opt into hot reload, run `npm run dev:web` and launch with
+`BULLETZ_DEV_URL=http://localhost:5174 npm run dev:desktop`.
+
+### Connecting GitHub
+
+1. Deploy the Bulletz server over HTTPS and run its database migrations. If the webhook URL shown in Bulletz uses an internal address, set the server's `PUBLIC_URL` to its public HTTPS base URL.
+2. As a Bulletz owner or admin, open **Apps → GitHub** and enter your GitHub organization name. Bulletz creates or reuses **#github**. You can pick other channels and filter repositories and events before connecting the webhook. Posts are visible to the workspace, so choose repository filters that match who should see the activity.
+3. As a GitHub organization owner, follow **Add webhook** in Bulletz. Paste the payload URL and secret, set content type to `application/json`, leave SSL verification on, and select the events you want delivered. The default feed handles pull requests, reviews, issues, issue comments, releases, and failed workflow runs.
+4. Save the webhook in GitHub. Its ping changes the Bulletz status to **Connected**. Activity arrives as GitHub bot posts with links back to GitHub. For inbox and desktop alerts, enable **GitHub activity** under **Settings → Notifications**.
+
+If **Waiting for GitHub** persists, check **Recent Deliveries** for the webhook in GitHub. After correcting the URL, content type, or secret, redeliver the ping or a matching event. Repeated deliveries are safe.
+
+Run the GitHub integration test against a migrated development database with `npm run test:github -w @bulletz/server` after building `@bulletz/shared`.
 
 ### Connecting your agent
 

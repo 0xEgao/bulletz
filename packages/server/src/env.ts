@@ -34,3 +34,16 @@ export const env = {
     .map((s) => s.trim())
     .filter(Boolean),
 };
+
+/** The address for links used outside this request, including behind a TLS proxy. */
+export function publicOrigin(req: { headers: Record<string, unknown>; protocol?: string }): string {
+  if (env.publicUrl) return env.publicUrl;
+  const header = (key: string) => {
+    const value = req.headers[key];
+    return typeof value === "string" ? value.split(",")[0]!.trim() : "";
+  };
+  const host = header("x-forwarded-host") || header("host");
+  if (!host) return "";
+  const protocol = header("x-forwarded-proto") || req.protocol || "https";
+  return `${protocol}://${host}`;
+}

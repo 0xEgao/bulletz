@@ -21,8 +21,9 @@ type Bridge = {
       /** True when this process was started against a different workspace or
        *  before a credential existed, so it will answer 401 until restarted. */
       stale?: boolean;
-      /** Set when an agent pane could not start — no agent command found. */
+      /** Set when the terminal could not start. */
       error?: string;
+      needsAgent?: boolean;
       /** True when nothing started because no project folder has been chosen.
        *  A different fix from a missing agent, so a different button. */
       needsProject?: boolean;
@@ -189,6 +190,7 @@ const THEME = {
 export function TerminalPane({
   id,
   kind = "shell",
+  autoFocus = false,
   onReady,
 }: {
   id: string;
@@ -196,6 +198,7 @@ export function TerminalPane({
    *  pane is identical either way — a pty is a pty — which is the point: the
    *  agent gets its own interface rather than one we invented for it. */
   kind?: "shell" | "agent";
+  autoFocus?: boolean;
   /** Hands back a writer so other parts of the app can type into this
    *  session — sending a highlighted message to the agent, for instance. */
   /** The writer refuses while the session is stale, so a caller must look at
@@ -208,6 +211,7 @@ export function TerminalPane({
   const [reattached, setReattached] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [needsProject, setNeedsProject] = useState(false);
+  const [needsAgent, setNeedsAgent] = useState(false);
   const [stale, setStale] = useState(false);
   // The writer handed out below is made once, at spawn, so it cannot close
   // over the state — it reads the ref instead.
@@ -222,13 +226,20 @@ export function TerminalPane({
 
   useEffect(() => {
     if (!api || !host.current) return;
+    setCwd("");
+    exitedRef.current = null;
     setExited(null);
+    setReattached(false);
+    setStartError(null);
+    setNeedsProject(false);
+    setNeedsAgent(false);
 
     const term = new Xterm({
       fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
       fontSize: 12,
       lineHeight: 1.25,
       cursorBlink: true,
+      disableStdin: true,
       allowProposedApi: true,
       theme: THEME,
       scrollback: 10_000,
@@ -237,6 +248,7 @@ export function TerminalPane({
     term.loadAddon(fit);
     term.open(host.current);
     fit.fit();
+    if (autoFocus) term.focus();
 
     let disposed = false;
     const offData = api.term.onData((tid, data) => {
@@ -244,22 +256,27 @@ export function TerminalPane({
     });
     const offExit = api.term.onExit((tid, code) => {
       if (tid !== id) return;
+      exitedRef.current = code;
       setExited(code);
+      onReady?.(null);
       // Say so in the terminal, the way a terminal would.
       term.write(`\r\n\x1b[90m[process exited with code ${code} — press Enter to start a new shell]\x1b[0m\r\n`);
     });
 
+    const showStartError = (message: string) => {
+      setStartError(message);
+      term.write(`\r\n\x1b[33m${message}\x1b[0m\r\n`);
+    };
+
     void api.term.spawn(id, term.cols, term.rows, kind).then((info) => {
       if (disposed) return;
       if (info.error) {
-        // No agent command found, or no folder chosen. Say so in the pane
-        // rather than failing with a bare ENOENT that points at nothing.
-        setStartError(info.error);
         setNeedsProject(Boolean(info.needsProject));
-        term.write(`\r\n\x1b[33m${info.error}\x1b[0m\r\n`);
+        setNeedsAgent(Boolean(info.needsAgent));
+        showStartError(info.error);
         return;
       }
-      setNeedsProject(false);
+      term.options.disableStdin = false;
       setCwd(info.cwd);
       // Hand back the output this view missed, so a reload resumes the session
       // instead of staring at a blank screen with a live job behind it.
@@ -273,10 +290,15 @@ export function TerminalPane({
       // credential is the mistake the stale badge exists to prevent, and a
       // badge alone only prevents it for someone who happens to look.
       onReady?.((data: string) => {
-        if (staleRef.current) return false;
+        if (staleRef.current || exitedRef.current !== null) return false;
         api.term.write(id, data);
         return true;
       });
+    }).catch((error: unknown) => {
+      if (!disposed) {
+        const detail = error instanceof Error ? error.message : String(error);
+        showStartError(`Could not start the terminal. ${detail}`);
+      }
     });
 
     term.onData((d) => {
@@ -308,7 +330,7 @@ export function TerminalPane({
       // is not. It is torn down only on an explicit kill or window close.
       term.dispose();
     };
-  }, [api, id, generation]);
+  }, [api, id, kind, autoFocus, onReady, generation]);
 
   // Re-ask whenever main says the workspace, credential or folder moved. The
   // answer cannot be settled at mount: switching workspace reloads the window,
@@ -343,12 +365,14 @@ export function TerminalPane({
     <div className="term-wrap">
       <div className="term-bar">
         <span className={`term-dot${startError ? " off" : ""}`} />
-        <span className="term-cwd">
+        <span className="term-cwd" role="status">
           {needsProject
             ? "no project folder"
-            : startError
+            : needsAgent
               ? "no agent configured"
-              : cwd || "starting…"}
+              : startError
+                ? "terminal failed to start"
+                : cwd || "starting…"}
         </span>
         {reattached && exited === null && <span className="term-reattached">reattached</span>}
         {stale && exited === null && (
@@ -392,10 +416,15 @@ export function TerminalPane({
             </button>
           </>
         )}
-        {startError && !needsProject && (
+        {startError && needsAgent && (
           // Restarting cannot help until a command exists, so point at the
           // thing that can.
           <span className="term-exit">Settings → Agent</span>
+        )}
+        {startError && !needsProject && !needsAgent && (
+          <button className="term-restart" onClick={() => setGeneration((g) => g + 1)}>
+            Retry
+          </button>
         )}
         {exited !== null && (
           <>

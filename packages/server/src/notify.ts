@@ -10,22 +10,11 @@
  * is a channel being busy, which is what the unread cursor is for. Notifying
  * on general activity is how people learn to ignore the bell.
  */
-import { maybeOne, q } from "./db.js";
+import { GITHUB_BOT_HANDLE, type Event, type Notification } from "@bulletz/shared";
+import { maybeOne, q, type QueryClient } from "./db.js";
 import { broadcast } from "./realtime.js";
 
-export type NotifyKind = "mention" | "reply" | "task" | "agent" | "system";
-
-export type Notification = {
-  id: string;
-  kind: NotifyKind;
-  title: string;
-  body: string | null;
-  channel_id: string | null;
-  event_id: string | null;
-  from_handle: string | null;
-  read_at: string | null;
-  created_at: string;
-};
+type NotifyKind = Notification["kind"];
 
 /** Absent means on: an existing account opts into new kinds rather than
  *  silently missing them. */
@@ -120,6 +109,24 @@ async function insert(
   // not something to broadcast twice.
   if (!row) return;
   broadcast(workspaceId, { type: "notification", actor_id: to.id, notification: row });
+}
+
+/** A GitHub feed always has unread counts. Inbox alerts are opt-in and honor channel mutes. */
+export async function githubNotifications(event: Event, client: QueryClient) {
+  return q<Notification & { actor_id: string }>(
+    `insert into notifications
+       (workspace_id, actor_id, kind, title, body, channel_id, event_id, from_actor_id, from_handle)
+     select $1, a.id, 'github', 'GitHub activity', $2, $3, $4, $5, $6
+       from actors a
+      where a.workspace_id = $1 and a.kind = 'human' and a.status = 'active'
+        and a.notify_prefs @> '{"github":true}'::jsonb
+        and not exists (
+          select 1 from channel_mutes m where m.actor_id = a.id and m.channel_id = $3)
+     on conflict do nothing
+     returning actor_id, id, kind, title, body, channel_id, event_id, from_handle, read_at, created_at`,
+    [event.workspace_id, excerpt(event.body), event.channel_id, event.id, event.actor_id, GITHUB_BOT_HANDLE],
+    client,
+  );
 }
 
 /**
@@ -306,6 +313,8 @@ export async function channelUnread(workspaceId: string, actorId: string) {
             count(e.id)::int as unread,
             count(e.id) filter (
               where e.body ilike '%@' || (select handle from actors where id = $2) || '%'
+                and not (e.payload @> '{"source":"github"}'::jsonb and
+                  e.actor_id in (select id from actors where workspace_id = $1 and handle = $3))
             )::int as mentions
        from channels c
        left join channel_reads r on r.channel_id = c.id and r.actor_id = $2
@@ -320,7 +329,7 @@ export async function channelUnread(workspaceId: string, actorId: string) {
       where c.workspace_id = $1 and c.status = 'open'
       group by c.id
      having count(e.id) > 0`,
-    [workspaceId, actorId],
+    [workspaceId, actorId, GITHUB_BOT_HANDLE],
   );
 }
 

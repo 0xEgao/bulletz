@@ -18,6 +18,7 @@ const KIND_MARK: Record<string, string> = {
   reply: "↩",
   task: "✓",
   agent: "◆",
+  github: "GH",
   system: "•",
   update: "↑",
 };

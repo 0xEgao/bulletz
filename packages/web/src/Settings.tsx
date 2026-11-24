@@ -441,6 +441,7 @@ const KINDS: { id: string; label: string; hint: string }[] = [
   { id: "reply", label: "Replies", hint: "Someone replies to a message you wrote" },
   { id: "task", label: "Tasks", hint: "A task is assigned to you" },
   { id: "agent", label: "Agent activity", hint: "Your agent posts the result of a run" },
+  { id: "github", label: "GitHub activity", hint: "New events in GitHub-connected channels you haven’t muted" },
 ];
 
 /**
@@ -466,8 +467,7 @@ function Notifications({ api, run }: { api: Api; run: Run }) {
   }, [api]);
 
   if (!prefs) return null;
-  // Absent means on, so a new notification kind is opt-out rather than missed.
-  const on = (k: string) => prefs[k] !== false;
+  const on = (k: string) => k === "github" ? prefs[k] === true : prefs[k] !== false;
 
   const toggle = (k: string) =>
     void run(async () => {

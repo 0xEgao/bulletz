@@ -1,8 +1,15 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import { fileURLToPath } from "node:url";
 
 export default defineConfig(({ command, mode }) => ({
   plugins: [react()],
+  // The standalone desktop build can bundle this module before shared/dist exists.
+  resolve: {
+    alias: {
+      "@bulletz/shared/github": fileURLToPath(new URL("../shared/src/github.ts", import.meta.url)),
+    },
+  },
   // Relative, because the same bundle is loaded two ways: served over http
   // from the server, and opened over file:// by the packaged desktop app.
   // An absolute base resolves to the filesystem root under file:// and the
@@ -16,10 +23,7 @@ export default defineConfig(({ command, mode }) => ({
     // file meant to be handed to other people. It has to be stripped here, not
     // remembered.
     ...(command === "build" ? { "import.meta.env.VITE_BULLETZ_TOKEN": "undefined" } : {}),
-    // A build for distribution must not pin a server either: the whole point
-    // of the first-run Connect screen is that the person installing it says
-    // where their workspace lives. A team building their own preconfigured
-    // binary can still pin one by building without this mode.
+    // Distribution ignores the developer's pinned web server.
     ...(mode === "package" ? { "import.meta.env.VITE_BULLETZ_URL": "undefined" } : {}),
   },
 }));
