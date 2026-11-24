@@ -39,7 +39,11 @@ jobs:
           # build if a compiled binary with the host's architecture ever shows
           # up inside the other arch's app.
           - name: macOS
-            os: macos-14
+            # Not pinned to a numbered image. macos-14 was retired between
+            # beta.6 and beta.8 and the job stopped being run at all — no
+            # runner, no steps, cancelled in a second, which reads as a build
+            # failure and is not one. A moving label cannot disappear.
+            os: macos-latest
             script: package:mac
             experimental: false
           # node-pty publishes no Linux prebuilds, so this is the one
